@@ -220,10 +220,19 @@ function multiDiffComparisonsForTab(tab: vscode.Tab | undefined): readonly Activ
   }));
 }
 
+function isActiveTabSingleDiffFor(tab: vscode.Tab | undefined, activeUri: string | undefined): boolean {
+  if (!tab || !activeUri) return false;
+  const input = tab.input;
+  if (vscode.TabInputTextDiff && input instanceof vscode.TabInputTextDiff) {
+    return input.original.toString() === activeUri || input.modified.toString() === activeUri;
+  }
+  return false;
+}
+
 function activeMultiDiffComparisons(): readonly ActiveComparison[] {
   const activeUri = vscode.window.activeTextEditor?.document.uri.toString();
   const tabs = candidateActiveTabs();
-  if (isActiveTabPlainTextFor(tabs[0], activeUri)) return [];
+  if (isActiveTabPlainTextFor(tabs[0], activeUri) || isActiveTabSingleDiffFor(tabs[0], activeUri)) return [];
   if (activeUri) {
     for (const tab of tabs) {
       const diffs = multiDiffComparisonsForTab(tab);
@@ -1035,13 +1044,14 @@ export async function alignActiveComparison(): Promise<boolean> {
           };
           return rank(a) - rank(b);
         });
-        let changedCount = 0;
+        let inspectedCount = 0;
         for (const comparison of prioritized) {
-          if (changedCount >= MAX_MULTI_DIFF_ENTRIES) break;
+          if (inspectedCount >= MAX_MULTI_DIFF_ENTRIES) break;
           if (!autoAlignEnabled(comparison)) continue;
           const leftDoc = findDocument(comparison.original);
           const rightDoc = findDocument(comparison.modified);
           if (!leftDoc && !rightDoc) continue;
+          inspectedCount += 1;
           const [left, right] = await resolveComparisonSides(comparison);
           const pairs: [vscode.Uri, SideResolution, vscode.TextDocument | undefined][] = [
             [comparison.original, left, leftDoc],
@@ -1057,7 +1067,6 @@ export async function alignActiveComparison(): Promise<boolean> {
             const result = await reopenComparisonSides(comparison, items);
             if (result.changed) {
               changed = true;
-              changedCount += 1;
             }
           }
         }

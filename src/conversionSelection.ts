@@ -182,7 +182,7 @@ export async function selectConversion(
     return undefined;
   }
 
-  const probeUri = vscode.Uri.joinPath(folderUri, "__auto_encoding_probe__.txt");
+  const probeUri = vscode.Uri.joinPath(folderUri, "__auto_encoding_probe__");
   const ruleTarget = suppliedTargetEncoding ?? expectedEncodingFor(probeUri)?.toLowerCase();
   const preset = suppliedTargetEncoding
     ? { targetEncoding: suppliedTargetEncoding, targetLineEnding: undefined }
@@ -378,7 +378,7 @@ async function scanFolderConversionCandidates(options: {
   } = options;
   const convertingEncoding = Boolean(requestedTarget);
   const folderRuleEncoding = expectedEncodingFor(
-    vscode.Uri.joinPath(folderUri, "__auto_encoding_probe__.txt"),
+    vscode.Uri.joinPath(folderUri, "__auto_encoding_probe__"),
   )?.toLowerCase();
   const excluded: vscode.QuickPickItem[] = [];
   let ambiguousCount = 0;

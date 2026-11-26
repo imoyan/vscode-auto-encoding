@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-11-26
+
+### Fixed
+- Declared `"capabilities": { "agentsWindow": { "supported": true } }` in `package.json` so VS Code automatically loads Auto Encoding inside the Agents Window without requiring manual `extensions.supportAgentsWindow` configuration.
+- Added embedded diff fallback alignment for `git:` documents rendered outside standard `tabGroups` (such as inline Changes views in the Agents Window).
+
 ## [0.2.0] - 2026-11-26
 
 ### Added

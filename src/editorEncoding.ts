@@ -1011,17 +1011,48 @@ function autoAlignEnabled(comparison: ActiveComparison): boolean {
   return configurationFor(scopeUri).get<boolean>("autoReopenGitComparison", true);
 }
 
+function visibleEmbeddedGitComparisons(hintUri?: vscode.Uri): readonly ActiveComparison[] {
+  const seen = new Set<string>();
+  const comparisons: ActiveComparison[] = [];
+  const pushGitUri = (gitUri: vscode.Uri): void => {
+    if (gitUri.scheme !== "git" || comparisons.length >= MAX_MULTI_DIFF_ENTRIES) return;
+    const key = gitUri.toString();
+    if (seen.has(key)) return;
+    seen.add(key);
+    const fileUri = fileUriForResource(gitUri);
+    comparisons.push({
+      original: gitUri,
+      modified: fileUri,
+      preview: false,
+      multiDiff: true,
+    });
+  };
+  if (hintUri?.scheme === "git") {
+    pushGitUri(hintUri);
+  }
+  for (const editor of vscode.window.visibleTextEditors ?? []) {
+    if (editor.document.uri.scheme === "git") {
+      pushGitUri(editor.document.uri);
+    }
+  }
+  return comparisons;
+}
+
 let aligning = false;
 let alignAgain = false;
+let pendingAlignHint: vscode.Uri | undefined;
 
-/** Keeps active Git/Multi-Diff comparisons and single Git views in the expected or detected encoding (display only, never saves). */
-export async function alignActiveComparison(): Promise<boolean> {
+/** Keeps active Git/Multi-Diff comparisons, embedded diff views, and single Git views in the expected or detected encoding (display only, never saves). */
+export async function alignActiveComparison(hintUri?: vscode.Uri): Promise<boolean> {
+  if (hintUri?.scheme === "git") pendingAlignHint = hintUri;
   if (aligning) { alignAgain = true; return false; }
   aligning = true;
   let changed = false;
   try {
     do {
       alignAgain = false;
+      const currentHint = pendingAlignHint;
+      pendingAlignHint = undefined;
       const multiDiffs = activeMultiDiffComparisons();
       if (multiDiffs.length > 0) {
         const focused = activeComparison();
@@ -1085,10 +1116,32 @@ export async function alignActiveComparison(): Promise<boolean> {
         continue;
       }
       const single = activeSingleGit();
-      if (!single || !autoAlignSingleEnabled(single.uri)) break;
-      const res = await resolveSingleSide(single.uri);
-      if (!manualSides.has(single.uri.toString()) && res.encoding && !sameEncoding(findDocument(single.uri)?.encoding, res.encoding)) {
-        changed = (await reopenSingleGit(single, res.encoding, res.basis)) || changed;
+      if (single) {
+        if (!autoAlignSingleEnabled(single.uri)) break;
+        const res = await resolveSingleSide(single.uri);
+        if (!manualSides.has(single.uri.toString()) && res.encoding && !sameEncoding(findDocument(single.uri)?.encoding, res.encoding)) {
+          changed = (await reopenSingleGit(single, res.encoding, res.basis)) || changed;
+        }
+        continue;
+      }
+      const embedded = visibleEmbeddedGitComparisons(currentHint);
+      for (const embeddedComparison of embedded) {
+        if (!autoAlignEnabled(embeddedComparison)) continue;
+        const leftDoc = findDocument(embeddedComparison.original);
+        const rightDoc = findDocument(embeddedComparison.modified);
+        if (!leftDoc && !rightDoc) continue;
+        const [left, right] = await resolveComparisonSides(embeddedComparison);
+        const pairs: [vscode.Uri, SideResolution, vscode.TextDocument | undefined][] = [
+          [embeddedComparison.original, left, leftDoc],
+          [embeddedComparison.modified, right, rightDoc],
+        ];
+        const items = pairs.flatMap(([uri, res, doc]) => {
+          if (!doc || !isReopenableScheme(uri.scheme) || manualSides.has(uri.toString()) || !res.encoding) return [];
+          return !sameEncoding(doc.encoding, res.encoding)
+            ? [{ uri, encoding: res.encoding, basis: res.basis }]
+            : [];
+        });
+        if (items.length > 0) changed = (await reopenComparisonSides(embeddedComparison, items)).changed || changed;
       }
     } while (alignAgain);
   } catch {

@@ -226,7 +226,7 @@ export function activate(context: vscode.ExtensionContext): void {
       isInAutoAlignedComparison(document) ||
       document.uri.scheme !== "file"
     ) {
-      await alignActiveComparison();
+      await alignActiveComparison(document.uri);
       const currentDoc = findOpenDocument(document.uri) ?? document;
       updateDocumentState(currentDoc);
       return undefined;

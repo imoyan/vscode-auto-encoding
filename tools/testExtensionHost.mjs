@@ -24,7 +24,10 @@ if (!executable && process.platform === "darwin") {
 }
 if (!executable) throw new Error("VSCODE_EXECUTABLEにVS Code実行ファイルを指定してください。");
 await fs.access(executable);
-const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "folder-encoding-host-"));
+const tempRoot = process.platform === "win32" ? os.tmpdir() : "/tmp";
+const temporary = await fs.realpath(
+  await fs.mkdtemp(path.join(tempRoot, "fe-")),
+);
 try {
   const extension = path.join(temporary, "extension");
   const plain = path.join(temporary, "plain");

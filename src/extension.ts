@@ -14,6 +14,7 @@ import {
 } from "./workspaceRules.js";
 import { EncodingDecorationProvider } from "./ruleDecorations.js";
 import {
+  activeComparisonDocument,
   alignActiveComparison,
   autoReopenWithDetectedEncoding,
   clearAutoReopenFailure,
@@ -134,7 +135,8 @@ export function activate(context: vscode.ExtensionContext): void {
       const diagnostic = diagnosticFor(document);
       setDocumentDiagnostic(document.uri, diagnostic);
     }
-    if (vscode.window.activeTextEditor?.document.uri.toString() === document.uri.toString()) {
+    const activeStatusDoc = vscode.window.activeTextEditor?.document ?? activeComparisonDocument();
+    if (activeStatusDoc?.uri.toString() === document.uri.toString()) {
       updateStatus(status, document);
     }
   };
@@ -227,11 +229,6 @@ export function activate(context: vscode.ExtensionContext): void {
       await alignActiveComparison();
       const currentDoc = findOpenDocument(document.uri) ?? document;
       updateDocumentState(currentDoc);
-      return undefined;
-    }
-    const folder = vscode.workspace.getWorkspaceFolder?.(document.uri);
-    if (!folder) {
-      updateDocumentState(document);
       return undefined;
     }
     if (!isVisibleDocument(document)) {
@@ -473,8 +470,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       const latestFolder = vscode.workspace.getWorkspaceFolder?.(currentDoc.uri);
-      if (!latestFolder) return undefined;
-      const config = configurationFor(latestMatchAfterInspect?.folder ?? latestFolder);
+      const config = configurationFor(latestMatchAfterInspect?.folder ?? latestFolder ?? currentDoc.uri);
       if (
         !latestMatchAfterInspect &&
         inspection.status === "detectedMismatch" &&
@@ -532,8 +528,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return undefined;
     }
     const afterFolder = vscode.workspace.getWorkspaceFolder?.(currentDoc.uri);
-    if (!afterFolder) return undefined;
-    const afterConfig = configurationFor(afterMatch?.folder ?? afterFolder);
+    const afterConfig = configurationFor(afterMatch?.folder ?? afterFolder ?? currentDoc.uri);
     if (!allowOpenWarning || currentDoc.isDirty || !afterConfig.get("warnOnOpen", true)) {
       return undefined;
     }
@@ -678,8 +673,12 @@ export function activate(context: vscode.ExtensionContext): void {
   const alignThenRefreshStatus = async (): Promise<void> => {
     try {
       await alignActiveComparison();
-      const active = vscode.window.activeTextEditor?.document;
-      if (active && !active.isClosed) updateDocumentState(active);
+      const active = vscode.window.activeTextEditor?.document ?? activeComparisonDocument();
+      if (active && !active.isClosed) {
+        updateDocumentState(active);
+      } else if (!vscode.window.activeTextEditor) {
+        status.hide();
+      }
     } catch (error) {
       if (!notifyConfigurationLimit(error)) throw error;
     }
@@ -728,7 +727,7 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand("autoEncoding.inspectActiveFile", async () => {
       await inspectActiveFile();
-      const active = vscode.window.activeTextEditor?.document;
+      const active = vscode.window.activeTextEditor?.document ?? activeComparisonDocument();
       if (active && !active.isClosed) updateDocumentState(active);
     }),
     vscode.commands.registerCommand(
@@ -751,7 +750,12 @@ export function activate(context: vscode.ExtensionContext): void {
       if (editor) {
         void ensureExpectedEncoding(editor.document);
       } else {
-        status.hide();
+        const comparisonDoc = activeComparisonDocument();
+        if (comparisonDoc && !comparisonDoc.isClosed) {
+          updateStatus(status, comparisonDoc);
+        } else {
+          status.hide();
+        }
       }
     }),
     ...(vscode.window.onDidChangeVisibleTextEditors
@@ -789,9 +793,8 @@ export function activate(context: vscode.ExtensionContext): void {
         const { document } = event;
         if (document.uri.scheme !== "file") return;
         const folder = vscode.workspace.getWorkspaceFolder?.(document.uri);
-        if (!folder) return;
         const match = resolveRule(document.uri);
-        const config = configurationFor(match?.folder ?? folder);
+        const config = configurationFor(match?.folder ?? folder ?? document.uri);
         const warnOnSave = config.get("warnOnSave", true);
         const filename = documentBasename(document);
         const details: string[] = [];

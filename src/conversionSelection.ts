@@ -182,7 +182,7 @@ export async function selectConversion(
     return undefined;
   }
 
-  const probeUri = vscode.Uri.joinPath(folderUri, "__auto_encoding_probe__.txt");
+  const probeUri = vscode.Uri.joinPath(folderUri, "__auto_encoding_probe__");
   const ruleTarget = suppliedTargetEncoding ?? expectedEncodingFor(probeUri)?.toLowerCase();
   const preset = suppliedTargetEncoding
     ? { targetEncoding: suppliedTargetEncoding, targetLineEnding: undefined }
@@ -377,6 +377,9 @@ async function scanFolderConversionCandidates(options: {
     expectedEncodingFor,
   } = options;
   const convertingEncoding = Boolean(requestedTarget);
+  const folderRuleEncoding = expectedEncodingFor(
+    vscode.Uri.joinPath(folderUri, "__auto_encoding_probe__"),
+  )?.toLowerCase();
   const excluded: vscode.QuickPickItem[] = [];
   let ambiguousCount = 0;
   const recordExcluded = (uri: vscode.Uri, reason: string): void => {
@@ -449,8 +452,14 @@ async function scanFolderConversionCandidates(options: {
           recordExcluded(uri, t("Has unsaved changes"));
           continue;
         }
-        const fileRuleEncoding = expectedEncodingFor(uri);
-        if (convertingEncoding && fileRuleEncoding && requestedTarget && fileRuleEncoding !== requestedTarget) {
+        const fileRuleEncoding = expectedEncodingFor(uri)?.toLowerCase();
+        const isConflictingChildRule = Boolean(
+          fileRuleEncoding &&
+          requestedTarget &&
+          fileRuleEncoding !== requestedTarget &&
+          fileRuleEncoding !== folderRuleEncoding,
+        );
+        if (convertingEncoding && isConflictingChildRule) {
           recordExcluded(uri, t("A different encoding rule applies"));
           continue;
         }

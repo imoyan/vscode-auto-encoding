@@ -9,8 +9,46 @@ import { ENCODINGS, encodingInfo } from "./rules.js";
 import { RuleMatch, resolveRule, configurationFor, fileUriForResource, clearWorkspaceRuleCache } from "./workspaceRules.js";
 
 interface ComparisonInput { original: vscode.Uri; modified: vscode.Uri }
-interface ActiveComparison extends ComparisonInput { label?: string; preview: boolean }
+interface ActiveComparison extends ComparisonInput { label?: string; preview: boolean; multiDiff?: boolean }
 interface ActiveSingleGit { uri: vscode.Uri; preview: boolean }
+
+const MAX_MULTI_DIFF_ENTRIES = 64;
+const MAX_MULTI_DIFF_SCAN = 4096;
+
+function isReopenableScheme(scheme: string): boolean {
+  return scheme === "file" || scheme === "git";
+}
+
+function isUriLike(value: unknown): value is vscode.Uri {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    typeof (value as vscode.Uri).scheme === "string" &&
+    typeof (value as vscode.Uri).toString === "function",
+  );
+}
+
+function extractMultiDiffInputs(input: unknown): readonly ComparisonInput[] | undefined {
+  if (!input || typeof input !== "object" || !("textDiffs" in input)) return undefined;
+  const raw = (input as { textDiffs?: unknown }).textDiffs;
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const diffs: ComparisonInput[] = [];
+  for (const entry of raw) {
+    if (diffs.length >= MAX_MULTI_DIFF_SCAN) break;
+    if (
+      entry &&
+      typeof entry === "object" &&
+      isUriLike((entry as { original?: unknown }).original) &&
+      isUriLike((entry as { modified?: unknown }).modified)
+    ) {
+      diffs.push({
+        original: (entry as { original: vscode.Uri }).original,
+        modified: (entry as { modified: vscode.Uri }).modified,
+      });
+    }
+  }
+  return diffs.length > 0 ? diffs : undefined;
+}
 
 type EncodingBasis = "rule" | "ruleFallback" | "openFile" | "detected";
 
@@ -149,12 +187,104 @@ export function clearEncodingDetectionCache(uri?: vscode.Uri): void {
   for (const target of targets) resolvedSides.delete(target);
 }
 
+function isActiveTabPlainTextFor(tab: vscode.Tab | undefined, activeUri: string | undefined): boolean {
+  if (!tab || !activeUri) return false;
+  const input = tab.input;
+  if (vscode.TabInputText && input instanceof vscode.TabInputText) {
+    return input.uri.toString() === activeUri;
+  }
+  return false;
+}
+
+function candidateActiveTabs(): readonly vscode.Tab[] {
+  const tabs: vscode.Tab[] = [];
+  const activeTab = vscode.window.tabGroups?.activeTabGroup?.activeTab;
+  if (activeTab) tabs.push(activeTab);
+  for (const group of vscode.window.tabGroups?.all ?? []) {
+    if (group.activeTab && group.activeTab !== activeTab) {
+      tabs.push(group.activeTab);
+    }
+  }
+  return tabs;
+}
+
+function multiDiffComparisonsForTab(tab: vscode.Tab | undefined): readonly ActiveComparison[] {
+  const diffs = extractMultiDiffInputs(tab?.input);
+  if (!diffs) return [];
+  return diffs.map((diff) => ({
+    original: diff.original,
+    modified: diff.modified,
+    label: tab?.label,
+    preview: tab?.isPreview === true,
+    multiDiff: true,
+  }));
+}
+
+function isActiveTabSingleDiffFor(tab: vscode.Tab | undefined, activeUri: string | undefined): boolean {
+  if (!tab || !activeUri) return false;
+  const input = tab.input;
+  if (vscode.TabInputTextDiff && input instanceof vscode.TabInputTextDiff) {
+    return input.original.toString() === activeUri || input.modified.toString() === activeUri;
+  }
+  return false;
+}
+
+function activeMultiDiffComparisons(): readonly ActiveComparison[] {
+  const activeUri = vscode.window.activeTextEditor?.document.uri.toString();
+  const tabs = candidateActiveTabs();
+  if (isActiveTabPlainTextFor(tabs[0], activeUri) || isActiveTabSingleDiffFor(tabs[0], activeUri)) return [];
+  if (activeUri) {
+    for (const tab of tabs) {
+      const diffs = multiDiffComparisonsForTab(tab);
+      if (diffs.some((diff) => diff.original.toString() === activeUri || diff.modified.toString() === activeUri)) {
+        return diffs;
+      }
+    }
+  }
+  return multiDiffComparisonsForTab(tabs[0]);
+}
+
 function activeComparison(): ActiveComparison | undefined {
-  const tab = vscode.window.tabGroups?.activeTabGroup?.activeTab;
-  const input = tab?.input;
-  return vscode.TabInputTextDiff && input instanceof vscode.TabInputTextDiff
-    ? { original: input.original, modified: input.modified, label: tab?.label, preview: tab?.isPreview === true }
-    : undefined;
+  const activeUri = vscode.window.activeTextEditor?.document.uri.toString();
+  const tabs = candidateActiveTabs();
+  if (isActiveTabPlainTextFor(tabs[0], activeUri)) return undefined;
+  if (activeUri) {
+    for (const tab of tabs) {
+      const input = tab.input;
+      if (vscode.TabInputTextDiff && input instanceof vscode.TabInputTextDiff) {
+        if (input.original.toString() === activeUri || input.modified.toString() === activeUri) {
+          return { original: input.original, modified: input.modified, label: tab.label, preview: tab.isPreview === true };
+        }
+      }
+      const multiDiffs = multiDiffComparisonsForTab(tab);
+      const focused = multiDiffs.find(
+        (diff) => diff.original.toString() === activeUri || diff.modified.toString() === activeUri,
+      );
+      if (focused) return focused;
+    }
+  }
+  const primaryTab = tabs[0];
+  const primaryInput = primaryTab?.input;
+  if (primaryTab && vscode.TabInputTextDiff && primaryInput instanceof vscode.TabInputTextDiff) {
+    return { original: primaryInput.original, modified: primaryInput.modified, label: primaryTab.label, preview: primaryTab.isPreview === true };
+  }
+  const multiDiffs = multiDiffComparisonsForTab(primaryTab);
+  if (multiDiffs.length === 0) return undefined;
+  const visibleUris = new Set(
+    (vscode.window.visibleTextEditors ?? []).map((editor) => editor.document.uri.toString()),
+  );
+  const visible = multiDiffs.find(
+    (diff) => visibleUris.has(diff.original.toString()) || visibleUris.has(diff.modified.toString()),
+  );
+  if (visible) return visible;
+  const loaded = multiDiffs.find((diff) => Boolean(findDocument(diff.modified) ?? findDocument(diff.original)));
+  return loaded ?? multiDiffs[0];
+}
+
+export function activeComparisonDocument(): vscode.TextDocument | undefined {
+  const comparison = activeComparison();
+  if (!comparison) return undefined;
+  return findDocument(comparison.modified) ?? findDocument(comparison.original);
 }
 
 function activeSingleGit(): ActiveSingleGit | undefined {
@@ -185,8 +315,16 @@ function comparisonEncoding(uri: vscode.Uri): string {
 }
 
 function comparisonLabel(input: ComparisonInput): string {
-  const leftSide = input.original.scheme === "git" ? t("Git") : t("Original");
-  const rightSide = input.modified.scheme === "git" ? t("Git") : t("Working");
+  const leftSide = input.original.scheme === "git"
+    ? t("Git")
+    : input.original.scheme === "file"
+      ? t("Original")
+      : t("Original (Virtual)");
+  const rightSide = input.modified.scheme === "git"
+    ? t("Git")
+    : input.modified.scheme === "file"
+      ? t("Working")
+      : t("Modified (Virtual)");
   return t(
     "Left ({0}): {1} / Right ({2}): {3}",
     leftSide,
@@ -197,9 +335,14 @@ function comparisonLabel(input: ComparisonInput): string {
 }
 
 function sideName(input: ComparisonInput, side: "original" | "modified"): string {
-  return side === "original"
-    ? input.original.scheme === "git" ? t("Left side (Git)") : t("Left side (Original)")
-    : input.modified.scheme === "git" ? t("Right side (Git)") : t("Right side (Working)");
+  if (side === "original") {
+    if (input.original.scheme === "git") return t("Left side (Git)");
+    if (input.original.scheme === "file") return t("Left side (Original)");
+    return t("Left side (Original, Virtual)");
+  }
+  if (input.modified.scheme === "git") return t("Right side (Git)");
+  if (input.modified.scheme === "file") return t("Right side (Working)");
+  return t("Right side (Modified, Virtual)");
 }
 
 function syncPreferredResolution(uri: vscode.Uri, counterpartUri?: vscode.Uri): { encoding: string; basis: EncodingBasis; match?: RuleMatch } | undefined {
@@ -586,7 +729,7 @@ async function evaluateDocumentBytes(
  * Returns any preserved session state while dirty without touching disk.
  */
 export async function inspectFileDocument(document: vscode.TextDocument): Promise<FileEncodingInspection | undefined> {
-  if (document.isClosed || document.uri.scheme !== "file" || !vscode.workspace.getWorkspaceFolder?.(document.uri)) {
+  if (document.isClosed || document.uri.scheme !== "file") {
     return undefined;
   }
   const key = document.uri.toString();
@@ -838,6 +981,14 @@ function currentSideResolution(uri: vscode.Uri, counterpartUri?: vscode.Uri): Si
 }
 
 export function isInAutoAlignedComparison(document: vscode.TextDocument): boolean {
+  const multiDiffs = activeMultiDiffComparisons();
+  if (multiDiffs.length > 0) {
+    return multiDiffs.some(
+      (comparison) =>
+        autoAlignEnabled(comparison) &&
+        [comparison.original, comparison.modified].some((uri) => uri.toString() === document.uri.toString()),
+    );
+  }
   const comparison = activeComparison();
   return !!comparison && autoAlignEnabled(comparison) &&
     [comparison.original, comparison.modified].some((uri) => uri.toString() === document.uri.toString());
@@ -847,15 +998,23 @@ function autoAlignSingleEnabled(uri: vscode.Uri): boolean {
   return uri.scheme === "git" && configurationFor(fileUriForResource(uri)).get<boolean>("autoReopenGitComparison", true);
 }
 
-function autoAlignEnabled(comparison: ComparisonInput): boolean {
-  if (![comparison.original, comparison.modified].some((uri) => uri.scheme === "git")) return false;
-  return configurationFor(fileUriForResource(comparison.modified)).get<boolean>("autoReopenGitComparison", true);
+function autoAlignEnabled(comparison: ActiveComparison): boolean {
+  const schemes = [comparison.original.scheme, comparison.modified.scheme];
+  const hasGit = schemes.includes("git");
+  const hasReopenable = schemes.some((scheme) => isReopenableScheme(scheme));
+  const hasVirtualPairedWithFile = schemes.includes("file") && schemes.some((scheme) => !isReopenableScheme(scheme));
+  if (!hasReopenable) return false;
+  if (!hasGit && !comparison.multiDiff && !hasVirtualPairedWithFile) return false;
+  const scopeUri = comparison.modified.scheme === "file" || comparison.modified.scheme === "git"
+    ? fileUriForResource(comparison.modified)
+    : fileUriForResource(comparison.original);
+  return configurationFor(scopeUri).get<boolean>("autoReopenGitComparison", true);
 }
 
 let aligning = false;
 let alignAgain = false;
 
-/** Keeps active Git comparisons and single Git views in the expected or detected encoding (display only, never saves). */
+/** Keeps active Git/Multi-Diff comparisons and single Git views in the expected or detected encoding (display only, never saves). */
 export async function alignActiveComparison(): Promise<boolean> {
   if (aligning) { alignAgain = true; return false; }
   aligning = true;
@@ -863,13 +1022,63 @@ export async function alignActiveComparison(): Promise<boolean> {
   try {
     do {
       alignAgain = false;
+      const multiDiffs = activeMultiDiffComparisons();
+      if (multiDiffs.length > 0) {
+        const focused = activeComparison();
+        const visibleUris = new Set(
+          (vscode.window.visibleTextEditors ?? []).map((editor) => editor.document.uri.toString()),
+        );
+        const prioritized = [...multiDiffs].sort((a, b) => {
+          const rank = (entry: ActiveComparison): number => {
+            if (
+              focused &&
+              entry.original.toString() === focused.original.toString() &&
+              entry.modified.toString() === focused.modified.toString()
+            ) {
+              return 0;
+            }
+            if (visibleUris.has(entry.original.toString()) || visibleUris.has(entry.modified.toString())) {
+              return 1;
+            }
+            return 2;
+          };
+          return rank(a) - rank(b);
+        });
+        let inspectedCount = 0;
+        for (const comparison of prioritized) {
+          if (inspectedCount >= MAX_MULTI_DIFF_ENTRIES) break;
+          if (!autoAlignEnabled(comparison)) continue;
+          const leftDoc = findDocument(comparison.original);
+          const rightDoc = findDocument(comparison.modified);
+          if (!leftDoc && !rightDoc) continue;
+          inspectedCount += 1;
+          const [left, right] = await resolveComparisonSides(comparison);
+          const pairs: [vscode.Uri, SideResolution, vscode.TextDocument | undefined][] = [
+            [comparison.original, left, leftDoc],
+            [comparison.modified, right, rightDoc],
+          ];
+          const items = pairs.flatMap(([uri, res, doc]) => {
+            if (!doc || !isReopenableScheme(uri.scheme) || manualSides.has(uri.toString()) || !res.encoding) return [];
+            return !sameEncoding(doc.encoding, res.encoding)
+              ? [{ uri, encoding: res.encoding, basis: res.basis }]
+              : [];
+          });
+          if (items.length > 0) {
+            const result = await reopenComparisonSides(comparison, items);
+            if (result.changed) {
+              changed = true;
+            }
+          }
+        }
+        continue;
+      }
       const comparison = activeComparison();
       if (comparison) {
         if (!autoAlignEnabled(comparison)) break;
         const [left, right] = await resolveComparisonSides(comparison);
         const pairs: [vscode.Uri, SideResolution][] = [[comparison.original, left], [comparison.modified, right]];
         const items = pairs.flatMap(([uri, res]) => {
-          if (manualSides.has(uri.toString()) || !res.encoding) return [];
+          if (!isReopenableScheme(uri.scheme) || manualSides.has(uri.toString()) || !res.encoding) return [];
           return !sameEncoding(findDocument(uri)?.encoding, res.encoding) ? [{ uri, encoding: res.encoding, basis: res.basis }] : [];
         });
         if (items.length > 0) changed = (await reopenComparisonSides(comparison, items)).changed || changed;
@@ -894,6 +1103,7 @@ export function isDocumentEncodingMatch(document: vscode.TextDocument, match: Ru
 
 export function diagnosticFor(document: vscode.TextDocument): vscode.Diagnostic | undefined {
   if (document.isClosed || document.uri.scheme === "git") return undefined;
+  if (document.uri.scheme === "file" && !vscode.workspace.getWorkspaceFolder?.(document.uri)) return undefined;
   const match = resolveRule(document.uri);
   const actual = encodingInfo(document.encoding).label;
   let message: string | undefined;
@@ -979,7 +1189,7 @@ const FILE_INSPECT_NOTE = t("Reopen changes display only (does not modify files)
 export const UNCONFIRMED_RULE_MESSAGE = t("Saved bytes could not be confirmed against the configured encoding rule; keeping the current encoding.");
 const DIRTY_MESSAGE = t("Cannot reopen while there are unsaved changes. Save or back up your changes before changing the encoding.");
 
-type InspectAction = "candidate" | "expected" | "choose" | "convertRule" | "convertFile" | "registerFile" | "registerFolder" | "original" | "modified";
+type InspectAction = "candidate" | "expected" | "choose" | "convertRule" | "convertFile" | "registerFile" | "registerFolder" | "original" | "modified" | "openWorkingFile";
 interface InspectChoice extends vscode.QuickPickItem { readonly action: InspectAction; readonly encoding?: string }
 
 function uniqueCandidates(resolutions: readonly SideResolution[]): string[] {
@@ -996,11 +1206,11 @@ function candidateTargetsFor(
     [comparison.modified, resolutions[1]],
   ];
   const direct = pairs
-    .filter(([, res]) => !res?.encoding && res?.candidates?.includes(candidate) === true)
+    .filter(([uri, res]) => isReopenableScheme(uri.scheme) && !res?.encoding && res?.candidates?.includes(candidate) === true)
     .map(([uri]) => uri);
   if (direct.length === 0) return [];
   for (const [uri, res] of pairs) {
-    if (!res?.encoding && res?.ascii && compatibleWithAscii(candidate, res.empty === true) &&
+    if (isReopenableScheme(uri.scheme) && !res?.encoding && res?.ascii && compatibleWithAscii(candidate, res.empty === true) &&
       !direct.some((entry) => entry.toString() === uri.toString())) {
       direct.push(uri);
     }
@@ -1154,12 +1364,12 @@ async function buildCandidatePreviews(
 }
 
 export async function inspectActiveFile(): Promise<void> {
-  const document = vscode.window.activeTextEditor?.document;
+  const comparison = activeComparison();
+  const document = vscode.window.activeTextEditor?.document ?? activeComparisonDocument();
   if (!document) {
     void vscode.window.showInformationMessage(t("Open a file to inspect its encoding."));
     return;
   }
-  const comparison = activeComparison();
   const details = await describeDocumentLineEndings(document);
   const resolutions = comparison
     ? await resolveComparisonSides(comparison)
@@ -1171,6 +1381,7 @@ export async function inspectActiveFile(): Promise<void> {
   const name = path.basename(document.fileName || document.uri.fsPath || document.uri.path);
   const mismatched = comparison
     ? ([comparison.original, comparison.modified] as const).some((uri, idx) => {
+      if (!isReopenableScheme(uri.scheme)) return false;
       const expected = resolutions[idx]?.encoding;
       const doc = findDocument(uri);
       return !!expected && !!doc && !sameEncoding(doc.encoding, expected);
@@ -1233,10 +1444,15 @@ export async function inspectActiveFile(): Promise<void> {
         : t("Display only"),
     });
   }
+  const hasVirtualComparisonSide = Boolean(
+    comparison && (!isReopenableScheme(comparison.original.scheme) || !isReopenableScheme(comparison.modified.scheme)),
+  );
   choices.push({
     action: "choose",
     label: t("$(symbol-text) Reopen with Another Encoding (no save)"),
-    description: comparison ? t("Both sides · keep diff view") : t("Display only"),
+    description: comparison
+      ? hasVirtualComparisonSide ? t("Working / Git side only · keep diff view") : t("Both sides · keep diff view")
+      : t("Display only"),
   });
   const fileUri = fileUriForResource(document.uri);
   const inWorkspaceFile = fileUri.scheme === "file" && Boolean(vscode.workspace.getWorkspaceFolder(fileUri));
@@ -1263,16 +1479,45 @@ export async function inspectActiveFile(): Promise<void> {
     );
   }
   if (comparison) {
-    choices.push(
-      { action: "original", label: t("$(arrow-left) Reopen {0} with Another Encoding", sideName(comparison, "original")), description: t("For inspecting intentional encoding conversion commits") },
-      { action: "modified", label: t("$(arrow-right) Reopen {0} with Another Encoding", sideName(comparison, "modified")), description: t("For inspecting intentional encoding conversion commits") },
-    );
+    const reopenableOriginal = isReopenableScheme(comparison.original.scheme);
+    const reopenableModified = isReopenableScheme(comparison.modified.scheme);
+    if (reopenableOriginal) {
+      choices.push({ action: "original", label: t("$(arrow-left) Reopen {0} with Another Encoding", sideName(comparison, "original")), description: t("For inspecting intentional encoding conversion commits") });
+    }
+    if (reopenableModified) {
+      choices.push({ action: "modified", label: t("$(arrow-right) Reopen {0} with Another Encoding", sideName(comparison, "modified")), description: t("For inspecting intentional encoding conversion commits") });
+    }
+    const workingFileUri = comparison.modified.scheme === "file"
+      ? comparison.modified
+      : comparison.original.scheme === "file"
+        ? comparison.original
+        : undefined;
+    if (workingFileUri && (comparison.multiDiff || !reopenableOriginal || !reopenableModified)) {
+      choices.push({
+        action: "openWorkingFile",
+        label: t("$(go-to-file) Open Working File in Standard Editor"),
+        description: t("Open as a standalone editor when multi-file diff or virtual snapshot is hard to read"),
+      });
+    }
   }
   const selected = await vscode.window.showQuickPick<InspectChoice>(choices, {
     title: `${name}: ${state} | ${details} | ${ruleText}${ruleSource}`,
     placeHolder: !comparison && document.uri.scheme === "file" && inWorkspaceFile ? FILE_INSPECT_NOTE : REOPEN_NOTE,
   });
   if (!selected) return;
+
+  if (selected.action === "openWorkingFile") {
+    const workingFileUri = comparison?.modified.scheme === "file"
+      ? comparison.modified
+      : comparison?.original.scheme === "file"
+        ? comparison.original
+        : undefined;
+    if (workingFileUri && typeof vscode.window.showTextDocument === "function") {
+      const targetDoc = findDocument(workingFileUri) ?? await vscode.workspace.openTextDocument(workingFileUri);
+      await vscode.window.showTextDocument(targetDoc, { preview: false, preserveFocus: false });
+    }
+    return;
+  }
 
   if (selected.action === "convertRule" || selected.action === "convertFile") {
     await vscode.commands.executeCommand("autoEncoding.convertFile", fileUri, selected.encoding);
@@ -1471,10 +1716,11 @@ export function forgetManualEncoding(uri: vscode.Uri): void {
   clearFileEncodingInspection(uri);
 }
 
-async function reopenComparisonToExpectation(comparison: ComparisonInput & { label?: string; preview: boolean }, fallback?: string): Promise<void> {
+async function reopenComparisonToExpectation(comparison: ActiveComparison, fallback?: string): Promise<void> {
   const [left, right] = await resolveComparisonSides(comparison);
   const pairs: [vscode.Uri, SideResolution][] = [[comparison.original, left], [comparison.modified, right]];
   const items = pairs.flatMap(([uri, res]) => {
+    if (!isReopenableScheme(uri.scheme)) return [];
     if (res.keepCurrentEncoding && !findDocument(uri)?.isDirty) return [];
     const encoding = res.encoding ?? (uri.scheme === "git" || uri.toString() === comparison.modified.toString() ? fallback : undefined);
     return encoding ? [{ uri, encoding, basis: res.basis }] : [];
@@ -1521,6 +1767,7 @@ async function reopenComparisonSides(
   let changed = false;
   let blocked = false;
   for (const { uri, encoding, basis } of items) {
+    if (!isReopenableScheme(uri.scheme)) continue;
     const document = findDocument(uri);
     if (document?.isDirty) { blocked = true; continue; }
     const key = uri.toString();
@@ -1541,10 +1788,9 @@ async function reopenComparisonSides(
       }
     } finally { endOpeningDocument(key); }
   }
-  // Restore the diff only if the user is still looking at this comparison; otherwise
-  // reopening it would steal focus or replace a newly selected preview tab.
   const current = activeComparison();
-  if (changed && current && current.original.toString() === comparison.original.toString() &&
+  if (changed && !comparison.multiDiff && current && !current.multiDiff &&
+    current.original.toString() === comparison.original.toString() &&
     current.modified.toString() === comparison.modified.toString()) {
     await vscode.commands.executeCommand("vscode.diff", comparison.original, comparison.modified,
       current.label ?? comparison.label ?? `${path.basename(comparison.modified.fsPath)} — ${comparisonLabel(comparison)}`, { preview: current.preview });
@@ -1628,7 +1874,10 @@ async function reopenWithEncoding(
 ): Promise<vscode.TextDocument | undefined> {
   const comparison = activeComparison();
   if (comparison && involves(comparison, document)) {
-    await reopenComparisonManually(comparison, [comparison.original, comparison.modified].map((uri) => ({ uri, encoding, basis })), manual);
+    const targets = [comparison.original, comparison.modified]
+      .filter((uri) => isReopenableScheme(uri.scheme))
+      .map((uri) => ({ uri, encoding, basis }));
+    await reopenComparisonManually(comparison, targets, manual);
     return findDocument(document.uri);
   }
   if (document.isClosed) return undefined;
@@ -1682,8 +1931,9 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
       { uri: rightUri, doc: findDocument(rightUri), res: currentSideResolution(rightUri, leftUri), directMatch: resolveRule(rightUri) },
     ] as const;
     const candidates = uniqueCandidates(sides.map((side) => side.res));
-    const targetMismatch = sides.some((side) => side.res.encoding && side.doc && !sameEncoding(side.doc.encoding, side.res.encoding));
-    const ruleMismatch = sides.some((side) => side.directMatch && side.doc && !sameEncoding(side.doc.encoding, side.directMatch.rule.encoding));
+    const hasVirtualSide = sides.some((side) => !isReopenableScheme(side.uri.scheme));
+    const targetMismatch = sides.some((side) => isReopenableScheme(side.uri.scheme) && side.res.encoding && side.doc && !sameEncoding(side.doc.encoding, side.res.encoding));
+    const ruleMismatch = sides.some((side) => isReopenableScheme(side.uri.scheme) && side.directMatch && side.doc && !sameEncoding(side.doc.encoding, side.directMatch.rule.encoding));
     const sidesDiffer = !!sides[0].doc && !!sides[1].doc && !sameEncoding(sides[0].doc.encoding, sides[1].doc.encoding);
     const unconfirmedWorkingFile = sides.some((side) => side.res.keepCurrentEncoding && side.doc && !side.doc.isDirty);
     const warn = candidates.length > 0 || targetMismatch || ruleMismatch || sidesDiffer || unconfirmedWorkingFile;
@@ -1718,13 +1968,17 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
           : ruleMismatch || targetMismatch
             ? t("One side differs from the expected encoding.")
             : sidesDiffer
-              ? t("Left and right sides use different encodings. Click to align unless inspecting an intentional conversion commit.")
+              ? hasVirtualSide
+                ? t("Virtual snapshot sides cannot change encoding due to VS Code limitations; only the working/Git side is aligned. Click to open the working file in a standard editor.")
+                : t("Left and right sides use different encodings. Click to align unless inspecting an intentional conversion commit.")
               : t("Both sides match.");
     status.tooltip = [
-      t("Shows the encodings currently used to read both sides of the Git comparison."),
+      comparison.multiDiff
+        ? t("Shows the encodings currently used to read the active file in the multi-file diff.")
+        : t("Shows the encodings currently used to read both sides of the Git comparison."),
       basisLine,
       stateLine,
-      t("Click to reopen both sides, register an encoding rule, or reopen one side. Reopening changes display only and never modifies files."),
+      t("Click to reopen, register an encoding rule, or open the working file in a standard editor. Reopening changes display only and never modifies files."),
     ].join("\n");
     status.show();
     return;
@@ -1732,7 +1986,7 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
 
   if (document.uri.scheme === "git") {
     const fileUri = fileUriForResource(document.uri);
-    if (fileUri.scheme !== "file" || !vscode.workspace.getWorkspaceFolder(fileUri)) {
+    if (fileUri.scheme !== "file") {
       status.hide();
       return;
     }
@@ -1795,7 +2049,7 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
   const inspection = currentFileInspection(document);
   if (!match) {
     const fileUri = fileUriForResource(document.uri);
-    if (fileUri.scheme !== "file" || !vscode.workspace.getWorkspaceFolder?.(fileUri)) {
+    if (fileUri.scheme !== "file") {
       status.hide();
       return;
     }

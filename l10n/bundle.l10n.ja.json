@@ -251,7 +251,7 @@
   "The current encoding of {0} ({1}) may differ from its saved bytes ({2}).": "{0} の読み込み文字コード（{1}）が保存済みの内容（{2}）と異なる可能性があります。",
   "Saving {0} while its encoding is still ambiguous (candidates: {1}).": "{0} の文字コードが未確定（候補: {1}）のまま保存しようとしています。",
   "Saving {0} while it could not be decoded without loss in {1}.": "{0} は現在の文字コード（{1}）で欠損なく読み込めていない状態で保存しようとしています。",
-  "{0} contains replacement characters (U+FFFD). Please verify the original content.": "{0} に置換文字（\uFFFD）が含まれています。元の内容を確認してください。",
+  "{0} contains replacement characters (U+FFFD). Please verify the original content.": "{0} に置換文字（�）が含まれています。元の内容を確認してください。",
   "Save warning: {0}": "保存注意: {0}",
   "Set Encoding": "文字コードを設定",
   "Select a file to configure": "設定するファイルを選択",
@@ -272,5 +272,15 @@
   "Registered files under {0} as {1}.": "{0} 以下を {1} として登録しました。",
   "Expected encoding: {0}\nRule source: {1} / {2}": "期待する文字コード: {0}\n適用元: {1} / {2}",
   "Folder rule: {0}\nTarget: {1} / {2}\nEach file uses the highest-priority matching rule.": "フォルダー設定: {0}\n対象: {1} / {2}\n各ファイルには一致するルールのうち優先順位が最も高いものを適用します。",
-  "Auto Encoding settings or path exceeded the evaluation limit. Reduce the number, length, or glob complexity of your rules.": "Auto Encoding の設定またはパスが評価上限を超えています。設定の件数・長さ・globの複雑さを減らしてください。"
+  "Auto Encoding settings or path exceeded the evaluation limit. Reduce the number, length, or glob complexity of your rules.": "Auto Encoding の設定またはパスが評価上限を超えています。設定の件数・長さ・globの複雑さを減らしてください。",
+  "Original (Virtual)": "比較元（仮想）",
+  "Modified (Virtual)": "比較先（仮想）",
+  "Left side (Original, Virtual)": "左側（比較元・仮想）",
+  "Right side (Modified, Virtual)": "右側（比較先・仮想）",
+  "Working / Git side only · keep diff view": "作業ファイル／Git側のみ・比較画面は維持",
+  "$(go-to-file) Open Working File in Standard Editor": "$(go-to-file) 作業ファイルを通常エディターで開く",
+  "Open as a standalone editor when multi-file diff or virtual snapshot is hard to read": "複数ファイル差分や仮想スナップショットで見づらい場合の単体表示",
+  "Virtual snapshot sides cannot change encoding due to VS Code limitations; only the working/Git side is aligned. Click to open the working file in a standard editor.": "仮想スナップショット側は VS Code の仕様上文字コードを変更できないため、作業ファイル／Git側のみ揃えています。見づらい場合はクリックして作業ファイルを通常エディターで開けます。",
+  "Shows the encodings currently used to read the active file in the multi-file diff.": "複数ファイル差分（Multi-Diff）の現在ファイルで読み込んでいる文字コードです。",
+  "Click to reopen, register an encoding rule, or open the working file in a standard editor. Reopening changes display only and never modifies files.": "クリックすると、開き直し・設定の登録・作業ファイルの通常表示を選べます。開き直しは表示だけの変更で、ファイルは書き換えません。"
 }

@@ -42,7 +42,7 @@ async function withObservedFileChange(
     accept = resolve;
     timer = setTimeout(
       () => reject(new Error(`Missing file event: ${[...pending].join(", ")}`)),
-      10000,
+      15000,
     );
   });
   const observe = (changed: vscode.Uri): void => {
@@ -53,6 +53,7 @@ async function withObservedFileChange(
   };
   const listeners = [watcher.onDidCreate(observe), watcher.onDidChange(observe)];
   try {
+    await new Promise((resolve) => setTimeout(resolve, 150));
     await action();
     await event;
   } finally {
@@ -64,7 +65,12 @@ async function withObservedFileChange(
 }
 
 async function writeObserved(uri: vscode.Uri, bytes: Uint8Array): Promise<void> {
-  await withObservedFileChange(uri, () => vscode.workspace.fs.writeFile(uri, bytes));
+  try {
+    await withObservedFileChange(uri, () => vscode.workspace.fs.writeFile(uri, bytes));
+  } catch {
+    // Retry once if macOS FSEvents missed the initial event on a newly created directory.
+    await withObservedFileChange(uri, () => vscode.workspace.fs.writeFile(uri, bytes));
+  }
 }
 
 export async function run(): Promise<void> {

@@ -1371,3 +1371,16 @@ test("inspectActiveFile ranks ambiguous candidates with non-ASCII line previews 
   });
   await h.command("inspectActiveFile");
 });
+
+test("outside-workspace local files auto-reopen and show status without emitting workspace diagnostics", async (t) => {
+  const h = await harness(t, { "external-sjis.txt": SJIS_JA_ASCII_OK });
+  await h.fireWorkspaceFoldersChange([]);
+
+  const doc = await h.openVisible(
+    "external-sjis.txt",
+    "utf8",
+    () => h.status.text === "$(pass) Shift JIS / CP932 (auto-detected · no rule)",
+  );
+  assert.equal(doc.encoding, "shiftjis");
+  assert.deepEqual(h.diagnosticsFor("external-sjis.txt"), []);
+});

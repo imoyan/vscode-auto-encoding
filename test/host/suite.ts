@@ -65,7 +65,12 @@ async function withObservedFileChange(
 }
 
 async function writeObserved(uri: vscode.Uri, bytes: Uint8Array): Promise<void> {
-  await withObservedFileChange(uri, () => vscode.workspace.fs.writeFile(uri, bytes));
+  try {
+    await withObservedFileChange(uri, () => vscode.workspace.fs.writeFile(uri, bytes));
+  } catch {
+    // Retry once if macOS FSEvents missed the initial event on a newly created directory.
+    await withObservedFileChange(uri, () => vscode.workspace.fs.writeFile(uri, bytes));
+  }
 }
 
 export async function run(): Promise<void> {

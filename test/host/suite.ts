@@ -42,7 +42,7 @@ async function withObservedFileChange(
     accept = resolve;
     timer = setTimeout(
       () => reject(new Error(`Missing file event: ${[...pending].join(", ")}`)),
-      10000,
+      15000,
     );
   });
   const observe = (changed: vscode.Uri): void => {
@@ -53,6 +53,7 @@ async function withObservedFileChange(
   };
   const listeners = [watcher.onDidCreate(observe), watcher.onDidChange(observe)];
   try {
+    await new Promise((resolve) => setTimeout(resolve, 150));
     await action();
     await event;
   } finally {

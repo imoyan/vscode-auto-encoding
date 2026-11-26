@@ -1,12 +1,37 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { t } from "./l10n.js";
-import { rankDecodedCandidates, type RankedEncodingCandidate } from "./candidatePreview.js";
-import { classifyEncoding, classifyTextLineEndings, classifyLineEndings, type EncodingClassification } from "./scanCore.js";
+import {
+  extractNonAsciiPreview,
+  rankDecodedCandidates,
+  type RankedEncodingCandidate,
+} from "./candidatePreview.js";
+import {
+  classifyEncoding,
+  classifyTextLineEndings,
+  classifyLineEndings,
+  decodeIso2022JpStrict,
+  isAsciiCompatibleEncoding,
+  type EncodingClassification,
+} from "./scanCore.js";
+import { createWorkspaceCodec } from "./conversionResources.js";
 import { configuredFileSizeLimit } from "./fileLimits.js";
 import { readStableResource, resourceStillMatchesRead } from "./stableResourceRead.js";
-import { ENCODINGS, encodingInfo } from "./rules.js";
-import { RuleMatch, resolveRule, configurationFor, fileUriForResource, clearWorkspaceRuleCache } from "./workspaceRules.js";
+import {
+  ENCODINGS,
+  ISO2022JP_ENCODING,
+  encodingInfo,
+  isLegacyMultibyteEncoding,
+  isReopenableEncoding,
+} from "./rules.js";
+import {
+  RuleMatch,
+  resolveRule,
+  configurationFor,
+  getAutoDetectEncodings,
+  fileUriForResource,
+  clearWorkspaceRuleCache,
+} from "./workspaceRules.js";
 
 interface ComparisonInput { original: vscode.Uri; modified: vscode.Uri }
 interface ActiveComparison extends ComparisonInput { label?: string; preview: boolean; multiDiff?: boolean }
@@ -77,7 +102,6 @@ export interface FileEncodingInspection {
 
 const MAX_CACHE_ENTRIES = 128;
 const CACHE_TTL_MS = 60_000;
-const ASCII_COMPATIBLE = new Set(["utf8", "shiftjis", "eucjp", "windows1252", "iso88591"]);
 
 const byteClassificationCache = new Map<string, {
   readonly fingerprint: string;
@@ -439,7 +463,8 @@ async function inspectUriBytes(
   }
   const read = await readResourceBytes(uri, maxResourceBytes(uri), isInvalid);
   if (!read) return undefined;
-  const cacheKey = `${uri.toString()}::${expectedEncoding}`;
+  const alternativeEncodings = getAutoDetectEncodings(fileUriForResource(uri));
+  const cacheKey = `${uri.toString()}::${expectedEncoding}::${alternativeEncodings.join(",")}`;
   const now = Date.now();
   const cached = byteClassificationCache.get(cacheKey);
   if (cached && cached.fingerprint === read.fingerprint && cached.expiresAt > now) {
@@ -452,10 +477,15 @@ async function inspectUriBytes(
       : undefined;
   }
   try {
-    const classification = await classifyEncoding(read.bytes, expectedEncoding, {
-      decode: async (bytes, encoding) => vscode.workspace.decode(bytes, { encoding }),
-      encode: async (text, encoding) => vscode.workspace.encode(text, { encoding }),
-    }, { allowNonCanonicalShiftJis: true });
+    const classification = await classifyEncoding(
+      read.bytes,
+      expectedEncoding,
+      createWorkspaceCodec(),
+      {
+        allowNonCanonicalShiftJis: true,
+        alternativeEncodings,
+      },
+    );
     const replacementCharacterCount = classification.replacementCharacterEncoding
       ? await countReplacementCharactersInBytes(read.bytes, classification.replacementCharacterEncoding)
       : undefined;
@@ -476,7 +506,7 @@ async function inspectUriBytes(
 
 function compatibleWithAscii(encoding: string, empty: boolean): boolean {
   const normalized = encoding.toLowerCase();
-  return empty || ASCII_COMPATIBLE.has(normalized) || normalized === "utf8bom";
+  return empty || isAsciiCompatibleEncoding(normalized) || normalized === "utf8bom";
 }
 
 async function classifySide(uri: vscode.Uri, counterpartUri?: vscode.Uri): Promise<SideResolution> {
@@ -589,7 +619,7 @@ async function evaluateDocumentBytes(
     if (!stillValid() || !current || current.classification.kind === "skip") return undefined;
     if (
       current.classification.kind === "match" ||
-      (current.classification.kind === "ascii" && (current.empty || ASCII_COMPATIBLE.has(docEncoding))) ||
+      (current.classification.kind === "ascii" && (current.empty || isAsciiCompatibleEncoding(docEncoding))) ||
       (current.classification.kind === "ambiguous" &&
         current.classification.candidates?.some((candidate) => candidate.toLowerCase() === docEncoding) === true)
     ) {
@@ -612,7 +642,7 @@ async function evaluateDocumentBytes(
   const { classification, empty } = inspected;
 
   if (classification.kind === "ascii") {
-    if (empty || ASCII_COMPATIBLE.has(docEncoding)) {
+    if (empty || isAsciiCompatibleEncoding(docEncoding)) {
       return {
         documentEncoding: docEncoding,
         status: "ok",
@@ -647,7 +677,7 @@ async function evaluateDocumentBytes(
         initialReplacementCharacterCount: replacement.count,
       };
     }
-    if (detected === "utf8" && (docEncoding === "shiftjis" || docEncoding === "eucjp")) {
+    if (detected === "utf8" && isLegacyMultibyteEncoding(docEncoding)) {
       const current = await inspectUriBytes(document.uri, docEncoding, isInvalid);
       if (!stillValid()) return undefined;
       if (current?.classification.kind === "ambiguous" && current.classification.candidates?.some((c) => c.toLowerCase() === docEncoding)) {
@@ -795,7 +825,7 @@ export async function inspectFileDocument(document: vscode.TextDocument): Promis
         });
       }
       let docCompatible =
-        (classification.kind === "ascii" && (empty || ASCII_COMPATIBLE.has(docEncoding))) ||
+        (classification.kind === "ascii" && (empty || isAsciiCompatibleEncoding(docEncoding))) ||
         (classification.kind === "ambiguous" && classification.candidates?.some((c) => c.toLowerCase() === docEncoding) === true);
       if (!docCompatible && manualSides.has(key) && docEncoding !== "utf8") {
         const current = await inspectUriBytes(document.uri, docEncoding, isInvalid);
@@ -803,7 +833,7 @@ export async function inspectFileDocument(document: vscode.TextDocument): Promis
         docCompatible = Boolean(
           current && (
             current.classification.kind === "match" ||
-            (current.classification.kind === "ascii" && (current.empty || ASCII_COMPATIBLE.has(docEncoding))) ||
+            (current.classification.kind === "ascii" && (current.empty || isAsciiCompatibleEncoding(docEncoding))) ||
             (current.classification.kind === "ambiguous" &&
               current.classification.candidates?.some((c) => c.toLowerCase() === docEncoding) === true)
           ),
@@ -928,7 +958,14 @@ export async function canReopenWithRule(document: vscode.TextDocument, match: Ru
 }
 
 export async function canReopenWithDetectedEncoding(document: vscode.TextDocument, expectedEncoding: string): Promise<boolean> {
-  if (document.isDirty || document.isClosed || document.uri.scheme !== "file") return false;
+  if (
+    document.isDirty ||
+    document.isClosed ||
+    document.uri.scheme !== "file" ||
+    !isReopenableEncoding(expectedEncoding)
+  ) {
+    return false;
+  }
   const version = document.version;
   const inspection = await inspectFileDocument(document);
   return document.version === version && !document.isDirty && !document.isClosed &&
@@ -1426,6 +1463,15 @@ async function buildCandidatePreviews(
   return { ordered, byEncoding };
 }
 
+async function iso2022JpPreviewFor(uri: vscode.Uri): Promise<string | undefined> {
+  const read = await readResourceBytes(uri, maxResourceBytes(uri));
+  if (!read) return undefined;
+  const decoded = decodeIso2022JpStrict(read.bytes);
+  if (decoded === undefined) return undefined;
+  if (read.stillCurrent && !(await read.stillCurrent())) return undefined;
+  return extractNonAsciiPreview(decoded);
+}
+
 export async function inspectActiveFile(): Promise<void> {
   const comparison = activeComparison();
   const document = vscode.window.activeTextEditor?.document ?? activeComparisonDocument();
@@ -1442,17 +1488,30 @@ export async function inspectActiveFile(): Promise<void> {
   const match = resolveRule(document.uri)
     ?? (comparison ? resolveRule(comparison.modified) ?? resolveRule(comparison.original) : undefined);
   const name = path.basename(document.fileName || document.uri.fsPath || document.uri.path);
+  const iso2022JpDetected =
+    !comparison &&
+    fileInspection?.status === "detectedMismatch" &&
+    fileInspection.detectedEncoding?.toLowerCase() === ISO2022JP_ENCODING;
+  const comparisonIso2022JpWorkingUri = comparison
+    ? comparison.modified.scheme === "file" &&
+      resolutions[1]?.encoding?.toLowerCase() === ISO2022JP_ENCODING
+      ? comparison.modified
+      : comparison.original.scheme === "file" &&
+          resolutions[0]?.encoding?.toLowerCase() === ISO2022JP_ENCODING
+        ? comparison.original
+        : undefined
+    : undefined;
   const mismatched = comparison
     ? ([comparison.original, comparison.modified] as const).some((uri, idx) => {
       if (!isReopenableScheme(uri.scheme)) return false;
       const expected = resolutions[idx]?.encoding;
       const doc = findDocument(uri);
-      return !!expected && !!doc && !sameEncoding(doc.encoding, expected);
+      return !!expected && isReopenableEncoding(expected) && !!doc && !sameEncoding(doc.encoding, expected);
     })
     : (() => {
       const resolution = resolutions[0];
       const expected = resolution?.keepCurrentEncoding ? undefined : (resolution?.encoding ?? match?.rule.encoding);
-      return !!expected && !sameEncoding(document.encoding, expected);
+      return !!expected && isReopenableEncoding(expected) && !sameEncoding(document.encoding, expected);
     })();
   const candidates = uniqueCandidates(resolutions);
   const rankedCandidates = await buildCandidatePreviews(document, comparison, resolutions, candidates);
@@ -1474,7 +1533,25 @@ export async function inspectActiveFile(): Promise<void> {
       ? t("Git: {0}", encodingInfo(document.encoding).label)
       : t("Current: {0}", encodingInfo(document.encoding).label);
 
+  const fileUri = fileUriForResource(document.uri);
+  const inWorkspaceFile = fileUri.scheme === "file" && Boolean(vscode.workspace.getWorkspaceFolder(fileUri));
+  const iso2022JpConvertUri =
+    iso2022JpDetected && inWorkspaceFile && document.uri.scheme === "file"
+      ? fileUri
+      : comparisonIso2022JpWorkingUri &&
+          Boolean(vscode.workspace.getWorkspaceFolder(comparisonIso2022JpWorkingUri))
+        ? comparisonIso2022JpWorkingUri
+        : undefined;
   const choices: InspectChoice[] = [];
+  if (iso2022JpConvertUri) {
+    const iso2022JpPreview = await iso2022JpPreviewFor(iso2022JpConvertUri);
+    choices.push({
+      action: "convertFile",
+      label: t("$(replace) Convert and Save from ISO-2022-JP (JIS) to UTF-8, etc...."),
+      description: t("Recommended because VS Code cannot open this encoding natively (with backup)"),
+      ...(iso2022JpPreview ? { detail: iso2022JpPreview } : {}),
+    });
+  }
   for (const candidate of orderedCandidates) {
     const targets = comparison ? candidateTargetsFor(comparison, resolutions, candidate) : [document.uri];
     const targetDesc = comparison
@@ -1517,8 +1594,6 @@ export async function inspectActiveFile(): Promise<void> {
       ? hasVirtualComparisonSide ? t("Working / Git side only · keep diff view") : t("Both sides · keep diff view")
       : t("Display only"),
   });
-  const fileUri = fileUriForResource(document.uri);
-  const inWorkspaceFile = fileUri.scheme === "file" && Boolean(vscode.workspace.getWorkspaceFolder(fileUri));
   if (inWorkspaceFile) {
     if (!comparison && document.uri.scheme === "file") {
       if (match && (fileInspection?.ruleConfirmed === false || (!isDocumentEncodingMatch(document, match) && fileInspection?.ruleConfirmed !== true))) {
@@ -1530,11 +1605,13 @@ export async function inspectActiveFile(): Promise<void> {
           description: t("Rewrites the file with confirmation and local backup"),
         });
       }
-      choices.push({
-        action: "convertFile",
-        label: t("$(replace) Convert and Save Encoding / Line Endings..."),
-        description: t("Rewrites the file with confirmation and local backup"),
-      });
+      if (!iso2022JpDetected) {
+        choices.push({
+          action: "convertFile",
+          label: t("$(replace) Convert and Save Encoding / Line Endings..."),
+          description: t("Rewrites the file with confirmation and local backup"),
+        });
+      }
     }
     choices.push(
       { action: "registerFile", label: t("$(pin) Set Encoding Rule for This File"), description: t("Also preserved in Git comparisons") },
@@ -1583,11 +1660,13 @@ export async function inspectActiveFile(): Promise<void> {
   }
 
   if (selected.action === "convertRule" || selected.action === "convertFile") {
-    await vscode.commands.executeCommand("autoEncoding.convertFile", fileUri, selected.encoding);
-    const active = findDocument(fileUri);
+    const convertTargetUri =
+      selected.action === "convertFile" ? (iso2022JpConvertUri ?? fileUri) : fileUri;
+    await vscode.commands.executeCommand("autoEncoding.convertFile", convertTargetUri, selected.encoding);
+    const active = findDocument(convertTargetUri);
     if (active && !active.isClosed) {
-      clearEncodingDetectionCache(fileUri);
-      clearFileEncodingInspection(fileUri);
+      clearEncodingDetectionCache(convertTargetUri);
+      clearFileEncodingInspection(convertTargetUri);
       await inspectFileDocument(active);
     }
     return;
@@ -1830,7 +1909,7 @@ async function reopenComparisonSides(
   let changed = false;
   let blocked = false;
   for (const { uri, encoding, basis } of items) {
-    if (!isReopenableScheme(uri.scheme)) continue;
+    if (!isReopenableScheme(uri.scheme) || !isReopenableEncoding(encoding)) continue;
     const document = findDocument(uri);
     if (document?.isDirty) { blocked = true; continue; }
     const key = uri.toString();
@@ -1862,6 +1941,7 @@ async function reopenComparisonSides(
 }
 
 async function reopenSingleGit(single: ActiveSingleGit, encoding: string, basis?: EncodingBasis): Promise<boolean> {
+  if (!isReopenableEncoding(encoding)) return false;
   const document = findDocument(single.uri);
   if (document?.isDirty) return false;
   const key = single.uri.toString();
@@ -1884,7 +1964,14 @@ export async function autoReopenWithDetectedEncoding(
   document: vscode.TextDocument,
   encoding: string,
 ): Promise<vscode.TextDocument | undefined> {
-  if (document.isDirty || document.isClosed || document.uri.scheme !== "file") return undefined;
+  if (
+    document.isDirty ||
+    document.isClosed ||
+    document.uri.scheme !== "file" ||
+    !isReopenableEncoding(encoding)
+  ) {
+    return undefined;
+  }
   const targetEncoding = encoding.toLowerCase();
   const previousEncoding = document.encoding;
   const normalizedPrevious = previousEncoding.toLowerCase();
@@ -1935,6 +2022,7 @@ async function reopenWithEncoding(
   manual = false,
   basis?: EncodingBasis,
 ): Promise<vscode.TextDocument | undefined> {
+  if (!isReopenableEncoding(encoding)) return undefined;
   const comparison = activeComparison();
   if (comparison && involves(comparison, document)) {
     const targets = [comparison.original, comparison.modified]
@@ -1995,21 +2083,24 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
     ] as const;
     const candidates = uniqueCandidates(sides.map((side) => side.res));
     const hasVirtualSide = sides.some((side) => !isReopenableScheme(side.uri.scheme));
-    const targetMismatch = sides.some((side) => isReopenableScheme(side.uri.scheme) && side.res.encoding && side.doc && !sameEncoding(side.doc.encoding, side.res.encoding));
+    const hasIso2022JpSide = sides.some((side) => side.res.encoding?.toLowerCase() === ISO2022JP_ENCODING);
+    const targetMismatch = sides.some((side) => isReopenableScheme(side.uri.scheme) && side.res.encoding && isReopenableEncoding(side.res.encoding) && side.doc && !sameEncoding(side.doc.encoding, side.res.encoding));
     const ruleMismatch = sides.some((side) => isReopenableScheme(side.uri.scheme) && side.directMatch && side.doc && !sameEncoding(side.doc.encoding, side.directMatch.rule.encoding));
     const sidesDiffer = !!sides[0].doc && !!sides[1].doc && !sameEncoding(sides[0].doc.encoding, sides[1].doc.encoding);
     const unconfirmedWorkingFile = sides.some((side) => side.res.keepCurrentEncoding && side.doc && !side.doc.isDirty);
-    const warn = candidates.length > 0 || targetMismatch || ruleMismatch || sidesDiffer || unconfirmedWorkingFile;
+    const warn = hasIso2022JpSide || candidates.length > 0 || targetMismatch || ruleMismatch || sidesDiffer || unconfirmedWorkingFile;
     const ruleMatch = sides.find((side) => side.directMatch)?.directMatch ?? sides.find((side) => side.res.match)?.res.match;
-    const suffix = !ruleMatch
-      ? candidates.length > 0
-        ? ` (${t("candidates")})`
-        : !warn && sides.some((side) => side.res.basis === "openFile")
-          ? ` (${t("from working file")})`
-          : !warn && sides.some((side) => side.res.basis === "detected" && side.doc && side.doc.encoding.toLowerCase() !== "utf8")
-            ? ` (${t("auto-detected")})`
-            : ""
-      : "";
+    const suffix = hasIso2022JpSide
+      ? ` (${t("ISO-2022-JP detected")})`
+      : !ruleMatch
+        ? candidates.length > 0
+          ? ` (${t("candidates")})`
+          : !warn && sides.some((side) => side.res.basis === "openFile")
+            ? ` (${t("from working file")})`
+            : !warn && sides.some((side) => side.res.basis === "detected" && side.doc && side.doc.encoding.toLowerCase() !== "utf8")
+              ? ` (${t("auto-detected")})`
+              : ""
+        : "";
     status.text = `${warn ? "$(warning)" : "$(pass)"} ${comparisonLabel(comparison)}${suffix}`;
     status.backgroundColor = warn ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
     const candidateLabels = candidates.map((id) => encodingInfo(id).label).join(" / ");
@@ -2022,7 +2113,9 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
           : sides.some((side) => side.res.basis === "detected")
             ? t("Encoding rule: none (auto-detected from bytes)")
             : t("Encoding rule: none");
-    const stateLine = candidates.length > 0
+    const stateLine = hasIso2022JpSide
+      ? t("One side is ISO-2022-JP (JIS). Because VS Code cannot open it natively, click to convert and save the working file as UTF-8, etc.")
+      : candidates.length > 0
       ? t("Multiple encoding candidates match, so auto-reopen was skipped. Click to choose and reopen.")
       : ruleMatch && sides.some((side) => side.res.actualMismatch)
         ? t("One side differs from the configured rule; displaying the detected encoding to prevent mojibake.")
@@ -2057,6 +2150,17 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
     const match = resolveRule(document.uri);
     const actual = encodingInfo(document.encoding).label;
     const candidates = uniqueCandidates([res]);
+    if (res.encoding?.toLowerCase() === ISO2022JP_ENCODING) {
+      const jisLabel = encodingInfo(ISO2022JP_ENCODING).label;
+      status.text = `$(warning) ${t("Git: {0} / Detected: {1} (unsupported by VS Code)", actual, jisLabel)}`;
+      status.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+      status.tooltip = [
+        t("Saved bytes in the Git view are {0}, which VS Code cannot open natively.", jisLabel),
+        t("Convert and save the working file as UTF-8, etc., or click to inspect settings."),
+      ].join("\n");
+      status.show();
+      return;
+    }
     if (match) {
       const expected = encodingInfo(match.rule.encoding);
       const matches = isDocumentEncodingMatch(document, match);
@@ -2120,11 +2224,19 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
     if (inspection && inspection.status !== "ok") {
       if (inspection.status === "detectedMismatch" && inspection.detectedEncoding) {
         const detectedLabel = encodingInfo(inspection.detectedEncoding).label;
-        status.text = `$(warning) ${t("Open: {0} / Detected: {1} (no rule)", actual, detectedLabel)}`;
-        status.tooltip = [
-          t("Current encoding ({0}) may differ from saved bytes ({1}).", actual, detectedLabel),
-          t("Click to reopen with the detected encoding (no save) or register a file/folder encoding rule."),
-        ].join("\n");
+        if (inspection.detectedEncoding.toLowerCase() === ISO2022JP_ENCODING) {
+          status.text = `$(warning) ${t("Open: {0} / Detected: {1} (convertible)", actual, detectedLabel)}`;
+          status.tooltip = [
+            t("Saved bytes are {0}, which VS Code cannot open natively.", detectedLabel),
+            t("Click to convert and save as UTF-8, Shift JIS, etc. with a local backup."),
+          ].join("\n");
+        } else {
+          status.text = `$(warning) ${t("Open: {0} / Detected: {1} (no rule)", actual, detectedLabel)}`;
+          status.tooltip = [
+            t("Current encoding ({0}) may differ from saved bytes ({1}).", actual, detectedLabel),
+            t("Click to reopen with the detected encoding (no save) or register a file/folder encoding rule."),
+          ].join("\n");
+        }
       } else if (inspection.status === "candidateMismatch" && inspection.candidates?.length) {
         const candidateLabels = inspection.candidates.map((id) => encodingInfo(id).label).join(" / ");
         status.text = `$(warning) ${t("Open: {0} (candidates · no rule)", actual)}`;
@@ -2174,12 +2286,15 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
   if (!matches && inspection?.ruleConfirmed === false && inspection.status !== "ok") {
     if (inspection.status === "detectedMismatch" && inspection.detectedEncoding) {
       const detectedLabel = encodingInfo(inspection.detectedEncoding).label;
+      const isIso2022Jp = inspection.detectedEncoding.toLowerCase() === ISO2022JP_ENCODING;
       status.text = `$(warning) ${t("Open: {0} / Rule: {1} (Actual: {2})", actual, expected, detectedLabel)}`;
       status.tooltip = [
         t("Open: {0}", actual),
         t("Rule: {0}", expected),
         t("Source: {0} / {1}", match.folder.name, match.rule.pattern),
-        t("Saved bytes appear to be {0}. Click to reopen (no save) or inspect the rule.", detectedLabel),
+        isIso2022Jp
+          ? t("Saved bytes are {0}, which VS Code cannot open natively. Click to convert and save as UTF-8, etc.", detectedLabel)
+          : t("Saved bytes appear to be {0}. Click to reopen (no save) or inspect the rule.", detectedLabel),
       ].join("\n");
     } else if (inspection.status === "candidateMismatch" && inspection.candidates?.length) {
       const candidateLabels = inspection.candidates.map((id) => encodingInfo(id).label).join(" / ");
@@ -2206,12 +2321,15 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
   if (matches && inspection && inspection.status !== "ok") {
     if (inspection.status === "detectedMismatch" && inspection.detectedEncoding) {
       const detectedLabel = encodingInfo(inspection.detectedEncoding).label;
+      const isIso2022Jp = inspection.detectedEncoding.toLowerCase() === ISO2022JP_ENCODING;
       status.text = `$(warning) ${t("Rule: {0} (Actual: {1})", expected, detectedLabel)}`;
       status.tooltip = [
         t("Open: {0}", actual),
         t("Rule: {0}", expected),
         t("Source: {0} / {1}", match.folder.name, match.rule.pattern),
-        t("Saved bytes appear to be {0}. Click to reopen (no save) or inspect the rule.", detectedLabel),
+        isIso2022Jp
+          ? t("Saved bytes are {0}, which VS Code cannot open natively. Click to convert and save as UTF-8, etc.", detectedLabel)
+          : t("Saved bytes appear to be {0}. Click to reopen (no save) or inspect the rule.", detectedLabel),
       ].join("\n");
     } else if (inspection.status === "candidateMismatch" && inspection.candidates?.length) {
       const candidateLabels = inspection.candidates.map((id) => encodingInfo(id).label).join(" / ");

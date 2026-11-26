@@ -1,6 +1,11 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { EncodingRule, findMatchingRule, sanitizeRules } from "./rules.js";
+import {
+  EncodingRule,
+  findMatchingRule,
+  sanitizeAutoDetectEncodings,
+  sanitizeRules,
+} from "./rules.js";
 import { clearGlobCache, compileGlob, ConfigurationLimitError } from "./boundedGlob.js";
 import { t } from "./l10n.js";
 
@@ -63,6 +68,11 @@ export interface RuleMatch {
 
 export function configurationFor(scope: vscode.ConfigurationScope): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration(CONFIGURATION_SECTION, scope);
+}
+
+/** Returns the configured candidate encodings for automatic detection in the given scope. */
+export function getAutoDetectEncodings(scope: vscode.ConfigurationScope): readonly string[] {
+  return sanitizeAutoDetectEncodings(configurationFor(scope).get<unknown>("autoDetectEncodings"));
 }
 
 export function getRules(folder: vscode.WorkspaceFolder, fresh = false): readonly EncodingRule[] {

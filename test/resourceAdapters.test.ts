@@ -58,6 +58,7 @@ test("conversion refresh only reloads an already-open clean document", async () 
     {
       "node:crypto": {},
       "./conversionCore.js": {},
+      "./rules.js": { ISO2022JP_ENCODING: "iso2022jp" },
       vscode: {
         workspace: {
           textDocuments: documents,
@@ -387,8 +388,21 @@ test("reopening a comparison side preserves both URIs and labels their encodings
     diagnosticFor(document: unknown): unknown;
   }>("editorEncoding.ts", {
     "node:path": path,
-    "./candidatePreview.js": { rankDecodedCandidates: () => [] },
-    "./scanCore.js": { classifyEncoding: async () => ({ kind: "match", detectedEncoding: "utf8bom" }) },
+    "./candidatePreview.js": {
+      rankDecodedCandidates: () => [],
+      extractNonAsciiPreview: (text: string) => `L1: ${text}`,
+    },
+    "./scanCore.js": {
+      classifyEncoding: async () => ({ kind: "match", detectedEncoding: "utf8bom" }),
+      decodeIso2022JpStrict: () => undefined,
+      isAsciiCompatibleEncoding: (encoding: string) => encoding !== "utf16le" && encoding !== "utf16be" && encoding !== "utf8bom",
+    },
+    "./conversionResources.js": {
+      createWorkspaceCodec: () => ({
+        decode: async () => "",
+        encode: async () => new Uint8Array(),
+      }),
+    },
     "./fileLimits.js": {},
     "./stableResourceRead.js": {
       readStableResource: async () => ({ bytes: new Uint8Array([0xef, 0xbb, 0xbf]), mtime: 1, size: 3 }),
@@ -398,9 +412,16 @@ test("reopening a comparison side preserves both URIs and labels their encodings
       resolveRule: () => ({ rule: { encoding: "utf8bom" } }),
       fileUriForResource: (value: unknown) => value,
       configurationFor: () => ({ get: (_key: string, fallback: unknown) => fallback }),
+      getAutoDetectEncodings: () => ["shiftjis", "eucjp"],
       clearWorkspaceRuleCache: () => undefined,
     },
-    "./rules.js": { encodingInfo: (id: string) => ({ label: id }), ENCODINGS: [] },
+    "./rules.js": {
+      encodingInfo: (id: string) => ({ label: id }),
+      ENCODINGS: [],
+      ISO2022JP_ENCODING: "iso2022jp",
+      isLegacyMultibyteEncoding: () => false,
+      isReopenableEncoding: () => true,
+    },
     "./l10n.js": {
       t: (s: string, ...args: unknown[]) =>
         s.replace(/\{(\d+)\}/g, (m, i: string) => (args[Number(i)] === undefined ? m : String(args[Number(i)]))),

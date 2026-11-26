@@ -8,7 +8,7 @@
 
 ## 主な機能
 
-- **通常ファイルの自動開き直し（`autoReopen`）**: ルール一致またはバイト列から一意に判定できた文字コード（UTF-8 / UTF-8 BOM / UTF-16 LE・BE / Shift JIS / EUC-JP / Windows-1252 / ISO 8859-1）で未編集ファイルを自動で開き直します。候補が複数ある曖昧なファイルは自動変更せず、ステータスバーからプレビュー付きで安全に選べます。
+- **通常ファイルの自動開き直し（`autoReopen`）**: ルール一致またはバイト列から一意に判定できた文字コード（UTF-8 / UTF-8 BOM / UTF-16 LE・BE（日本語中心の BOM なし含む） / Shift JIS / EUC-JP / Windows-1252・ISO-8859-1、設定追加時は GB18030 / Big5 / EUC-KR）で未編集ファイルを自動で開き直します。候補が複数ある曖昧なファイルは自動変更せず、ステータスバーからプレビュー付きで安全に選べます。VS Code 標準では直接開けない **ISO-2022-JP（JIS）** も自動検知し、ステータスバーや通知から 1 クリックで UTF-8 等へ変換保存できます。
 - **Git 比較・エージェント複数ファイル差分の文字化け防止（`autoReopenGitComparison`）**: 作業中・ステージ済み・コミット履歴・ファイル移動の Git 比較、単体 Git 表示、さらに複数ファイル差分（Multi-Diff / Agents Window の Changes ビュー）でも自動で文字コードを揃えます（表示のみの変更で、ファイルは書き換えません）。VS Code 仕様上文字コード変更できない仮想スナップショット側は安全にスキップし、メニューから作業ファイルを通常エディターで開けます。
 - **Agents Window 対応**: `capabilities.agentsWindow.supported: true` を宣言しているため、設定不要で VS Code の Agents Window 内で自動有効化されます（埋め込み Changes 差分・ワークスペース外ローカルファイル・worktree にも対応）。
 - **フォルダー・ファイル単位の文字コード設定**: エクスプローラーの右クリックからフォルダーやファイルごとに文字コードルール（`autoEncoding.rules`）を登録でき、エクスプローラー上にバッジ（`SJ`, `U8`, `EJ` など）を表示できます。
@@ -59,6 +59,7 @@
 | `autoEncoding.rules` | `[]` | ワークスペース相対 glob と期待する文字コードの配列。上から順に評価し最初に一致したルールを適用。 |
 | `autoEncoding.autoReopen` | `true` | 未編集ファイルをルール一致または一意な自動判定で自動的に開き直す。 |
 | `autoEncoding.autoReopenGitComparison` | `true` | Git 比較・単体 Git 表示を自動的に開き直す（表示のみ）。 |
+| `autoEncoding.autoDetectEncodings` | `["shiftjis", "eucjp"]` | UTF-8・BOM・ISO-2022-JP 以外の自動判定で優先的に検査する文字コード候補（`gb18030`・`big5hkscs`・`euckr`・`windows1252`・`iso88591` を追加、または `[]` で無効化可能）。 |
 | `autoEncoding.warnOnOpen` | `true` | 自動開き直しオフ時や読み込み欠損時に通知する。 |
 | `autoEncoding.warnOnSave` | `true` | 保存時に文字コード不一致・読み込み欠損・置換文字（`U+FFFD`）を通知する。 |
 | `autoEncoding.showExplorerBadges` | `true` | 設定済みフォルダー・ルール対象ファイルにエクスプローラーバッジを表示する。 |

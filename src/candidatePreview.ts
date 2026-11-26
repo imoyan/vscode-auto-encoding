@@ -40,6 +40,7 @@ type CharCategory =
   | "katakana"
   | "cjkPunct"
   | "kanji"
+  | "hangul"
   | "commonSymbol"
   | "latinLetter"
   | "halfwidthKatakana"
@@ -119,6 +120,14 @@ function isKanji(cp: number): boolean {
   );
 }
 
+function isHangul(cp: number): boolean {
+  return (
+    (cp >= 0xac00 && cp <= 0xd7a3) ||
+    (cp >= 0x1100 && cp <= 0x11ff) ||
+    (cp >= 0x3130 && cp <= 0x318f)
+  );
+}
+
 function classifyCodePoint(cp: number): CharCategory {
   if (cp < 0x80) return "ascii";
   if (cp === 0xfffd) return "replacement";
@@ -133,6 +142,7 @@ function classifyCodePoint(cp: number): CharCategory {
     return "cjkPunct";
   }
   if (isKanji(cp)) return "kanji";
+  if (isHangul(cp)) return "hangul";
   if (cp >= 0xff61 && cp <= 0xff65) return "halfwidthKatakanaPunct";
   if (cp >= 0xff66 && cp <= 0xff9f) return "halfwidthKatakana";
   if ((cp >= 0xe000 && cp <= 0xf8ff) || (cp >= 0xfff0 && cp <= 0xffff)) {
@@ -189,6 +199,9 @@ export function scoreDecodedText(text: string): DecodedTextScore {
       case "kanji":
         score += 2.0;
         break;
+      case "hangul":
+        score += 3.5;
+        break;
       case "commonSymbol":
         score += 1.0;
         break;
@@ -224,7 +237,10 @@ export function scoreDecodedText(text: string): DecodedTextScore {
         break;
     }
 
-    if (isJapaneseCore(prevCategory) && isJapaneseCore(category)) {
+    if (
+      (isJapaneseCore(prevCategory) && isJapaneseCore(category)) ||
+      (prevCategory === "hangul" && category === "hangul")
+    ) {
       score += 1.5;
     }
 

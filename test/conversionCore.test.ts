@@ -525,3 +525,33 @@ test("converts non-canonical CP932 alias bytes to UTF-8 and preserves alias byte
   const alreadyLf = Uint8Array.from([0xfa, 0x4a, 0x0a]);
   assert.deepEqual(await assessEncodingConversion(alreadyLf, "shiftjis", "shiftjis", sjisCodec, undefined, "lf"), { kind: "skipped", reason: "unchanged" });
 });
+
+test("converts ISO-2022-JP source bytes to UTF-8 and rejects ISO-2022-JP as target", async () => {
+  const jisBytes = Uint8Array.from([
+    0x1b, 0x24, 0x42, 0x46, 0x7c, 0x4b, 0x5c, 0x38, 0x6c, 0x1b, 0x28, 0x42, 0x0a,
+  ]);
+  const jisCodec: EncodingCodec = {
+    decode: async (bytes, encoding) => {
+      if (encoding === "iso2022jp") return new TextDecoder("iso-2022-jp", { fatal: true }).decode(bytes);
+      return codec.decode(bytes, encoding);
+    },
+    encode: async (text, encoding) => {
+      if (encoding === "iso2022jp") throw new Error("read-only");
+      return codec.encode(text, encoding);
+    },
+  };
+  const ready = await assessEncodingConversion(jisBytes, "iso2022jp", "utf8", jisCodec);
+  assert.equal(ready.kind, "ready");
+  if (ready.kind === "ready") {
+    assert.equal(ready.prepared.text, "日本語\n");
+    assert.deepEqual(ready.prepared.converted, new TextEncoder().encode("日本語\n"));
+  }
+
+  const rejectedTarget = await assessEncodingConversion(
+    new TextEncoder().encode("日本語\n"),
+    "utf8",
+    "iso2022jp",
+    jisCodec,
+  );
+  assert.deepEqual(rejectedTarget, { kind: "skipped", reason: "targetMismatch" });
+});

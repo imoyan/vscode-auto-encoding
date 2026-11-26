@@ -9,8 +9,15 @@ import {
   looksLikeBinary,
 } from "./conversionCore.js";
 import { LAST_BACKUP_KEY, PROTECTED_BACKUP_KEY } from "./conversionBackup.js";
-import { isDirty, hashBytes } from "./conversionResources.js";
-import { ENCODINGS, encodingInfo } from "./rules.js";
+import { createWorkspaceCodec, isDirty, hashBytes } from "./conversionResources.js";
+import {
+  ENCODINGS,
+  ISO2022JP_ENCODING,
+  SOURCE_ONLY_ENCODINGS,
+  encodingInfo,
+  isLegacyMultibyteEncoding,
+  sanitizeAutoDetectEncodings,
+} from "./rules.js";
 import { readPinnedLocalFile } from "./pinnedLocalFile.js";
 import { resolveRealDirectory, resolveRealPathWithin } from "./localPathSafety.js";
 import {
@@ -22,6 +29,7 @@ import {
 import {
   classifyEncoding,
   classifyLineEndings,
+  decodeIso2022JpStrict,
   detectUtf16Signal,
   isAsciiCompatibleEncoding,
   type EncodingClassification,
@@ -30,7 +38,7 @@ import {
 import { compileGlob } from "./boundedGlob.js";
 import { DirectoryScanCursor } from "./directoryScanCursor.js";
 import { isManualEncodingOverride } from "./editorEncoding.js";
-import { rankDecodedCandidates } from "./candidatePreview.js";
+import { extractNonAsciiPreview, rankDecodedCandidates } from "./candidatePreview.js";
 
 const AUTO_SOURCE = "auto";
 function skipReasonLabel(
@@ -50,12 +58,7 @@ function skipReasonLabel(
   }
 }
 
-const vscodeCodec = {
-  decode: async (bytes: Uint8Array, encoding: string): Promise<string> =>
-    vscode.workspace.decode(bytes, { encoding }),
-  encode: async (text: string, encoding: string): Promise<Uint8Array> =>
-    vscode.workspace.encode(text, { encoding }),
-};
+const vscodeCodec = createWorkspaceCodec();
 
 export interface ConversionCandidate extends vscode.QuickPickItem {
   readonly needsConfirmation: boolean;
@@ -164,6 +167,9 @@ export async function selectConversion(
   }
   const config = configurationFor(workspaceFolder.uri);
   const maxFileSize = configuredFileSizeLimit(config.get<number>("maxFileSizeKB", 5120));
+  const autoDetectEncodings = sanitizeAutoDetectEncodings(
+    config.get<unknown>("autoDetectEncodings"),
+  );
 
   if (fileUri) {
     return selectSingleFileConversion({
@@ -173,6 +179,7 @@ export async function selectConversion(
       folderRealPath,
       workspaceRootRealPath,
       maxFileSize,
+      autoDetectEncodings,
       expectedEncodingFor,
       suppliedTargetEncoding,
     });
@@ -206,6 +213,7 @@ export async function selectConversion(
     workspaceRootRealPath,
     maxFiles,
     maxFileSize,
+    autoDetectEncodings,
     exclusion,
     selectedSource,
     requestedTarget,
@@ -226,6 +234,7 @@ export async function selectConversion(
       t("Select Current Encoding"),
       targetLineEnding ? undefined : requestedTarget,
       t("Some files could not be uniquely identified automatically. Please select the source encoding."),
+      Boolean(requestedTarget),
     );
     if (!manualSource) return undefined;
     selectedSource = manualSource;
@@ -235,6 +244,7 @@ export async function selectConversion(
       workspaceRootRealPath,
       maxFiles,
       maxFileSize,
+      autoDetectEncodings,
       exclusion,
       selectedSource,
       requestedTarget,
@@ -268,6 +278,7 @@ export async function selectConversion(
         t("Select Current Encoding"),
         targetLineEnding ? undefined : requestedTarget,
         t("Rescan the folder using the selected source encoding."),
+        Boolean(requestedTarget),
       );
       if (!manualSource) return undefined;
       selectedSource = manualSource;
@@ -277,6 +288,7 @@ export async function selectConversion(
         workspaceRootRealPath,
         maxFiles,
         maxFileSize,
+        autoDetectEncodings,
         exclusion,
         selectedSource,
         requestedTarget,
@@ -358,6 +370,7 @@ async function scanFolderConversionCandidates(options: {
   readonly workspaceRootRealPath: string;
   readonly maxFiles: number;
   readonly maxFileSize: number;
+  readonly autoDetectEncodings: readonly string[];
   readonly exclusion: ReturnType<typeof compileGlob>;
   readonly selectedSource: string;
   readonly requestedTarget?: string;
@@ -370,6 +383,7 @@ async function scanFolderConversionCandidates(options: {
     workspaceRootRealPath,
     maxFiles,
     maxFileSize,
+    autoDetectEncodings,
     exclusion,
     selectedSource,
     requestedTarget,
@@ -484,6 +498,7 @@ async function scanFolderConversionCandidates(options: {
           let needsConfirmation = false;
           if (selectedSource === AUTO_SOURCE) {
             const autoClassification = await classifyEncoding(original, "utf8", vscodeCodec, {
+              alternativeEncodings: autoDetectEncodings,
               allowNonCanonicalShiftJis: true,
               isCancellationRequested: () => token.isCancellationRequested,
             });
@@ -584,6 +599,7 @@ async function selectSingleFileConversion(options: {
   readonly folderRealPath: string;
   readonly workspaceRootRealPath: string;
   readonly maxFileSize: number;
+  readonly autoDetectEncodings: readonly string[];
   readonly expectedEncodingFor: (uri: vscode.Uri) => string | undefined;
   readonly suppliedTargetEncoding?: string;
 }): Promise<ConversionSelection | undefined> {
@@ -594,6 +610,7 @@ async function selectSingleFileConversion(options: {
     folderRealPath,
     workspaceRootRealPath,
     maxFileSize,
+    autoDetectEncodings,
     expectedEncodingFor,
     suppliedTargetEncoding,
   } = options;
@@ -640,6 +657,7 @@ async function selectSingleFileConversion(options: {
   }
 
   const classification = await classifyEncoding(original, "utf8", vscodeCodec, {
+    alternativeEncodings: autoDetectEncodings,
     allowNonCanonicalShiftJis: true,
   });
   if (classification.kind === "skip") {
@@ -660,9 +678,6 @@ async function selectSingleFileConversion(options: {
   if (suppliedTargetEncoding) {
     requestedTarget = suppliedTargetEncoding;
   } else {
-    const currentEolLabel = formatLineEndingSummary(
-      classifyLineEndings(original, detectUtf16Signal(original)),
-    );
     const previewAuto = await resolveAutoSourceEncoding(original, classification, {
       convertingEncoding: true,
       fileRuleEncoding,
@@ -673,10 +688,19 @@ async function selectSingleFileConversion(options: {
     });
     const currentEncodingHint =
       previewAuto.kind === "resolved" ? previewAuto.encoding : undefined;
+    const currentEolLabel = formatLineEndingSummary(
+      classifyLineEndings(original, currentEncodingHint ?? detectUtf16Signal(original)),
+    );
+    const decodedIso2022Jp =
+      currentEncodingHint === ISO2022JP_ENCODING ? decodeIso2022JpStrict(original) : undefined;
+    const sourcePreview = decodedIso2022Jp
+      ? extractNonAsciiPreview(decodedIso2022Jp, { maxLength: 60 })
+      : undefined;
     const preset = await pickConversionPreset({
       ruleEncoding: fileRuleEncoding,
       currentEncodingHint,
       currentEolLabel,
+      sourcePreview,
     });
     if (!preset) return undefined;
     requestedTarget = preset.targetEncoding;
@@ -764,8 +788,9 @@ async function pickConversionPreset(options: {
   readonly ruleEncoding?: string;
   readonly currentEncodingHint?: string;
   readonly currentEolLabel?: string;
+  readonly sourcePreview?: string;
 }): Promise<ConversionPreset | undefined> {
-  const { ruleEncoding, currentEncodingHint, currentEolLabel } = options;
+  const { ruleEncoding, currentEncodingHint, currentEolLabel, sourcePreview } = options;
   const eolNote = currentEolLabel
     ? t("Keep EOL (current: {0})", currentEolLabel)
     : t("Keep EOL");
@@ -820,25 +845,37 @@ async function pickConversionPreset(options: {
     );
   }
 
-  items.push(
-    {
-      label: t("Line endings only → LF"),
-      description: t("Keep current encoding"),
-      targetLineEnding: "lf",
-    },
-    {
-      label: t("Line endings only → CRLF"),
-      description: t("Keep current encoding"),
-      targetLineEnding: "crlf",
-    },
-    ...secondaryEncodings.map(makeEncodingItem),
-  );
+  if (currentEncodingHint !== ISO2022JP_ENCODING) {
+    items.push(
+      {
+        label: t("Line endings only → LF"),
+        description: t("Keep current encoding"),
+        targetLineEnding: "lf",
+      },
+      {
+        label: t("Line endings only → CRLF"),
+        description: t("Keep current encoding"),
+        targetLineEnding: "crlf",
+      },
+    );
+  }
+  items.push(...secondaryEncodings.map(makeEncodingItem));
 
-  const placeHolder = currentEncodingHint
-    ? currentEolLabel
-      ? t("Current: {0} / {1} — Select target format", encodingInfo(currentEncodingHint).label, currentEolLabel)
-      : t("Current: {0} — Select target format", encodingInfo(currentEncodingHint).label)
-    : t("Select target encoding or line ending");
+  let placeHolder: string;
+  if (!currentEncodingHint) {
+    placeHolder = t("Select target encoding or line ending");
+  } else {
+    const currentLabel = encodingInfo(currentEncodingHint).label;
+    if (currentEolLabel && sourcePreview) {
+      placeHolder = t("Current: {0} / {1} (Preview: {2}) — Select target format", currentLabel, currentEolLabel, sourcePreview);
+    } else if (sourcePreview) {
+      placeHolder = t("Current: {0} (Preview: {1}) — Select target format", currentLabel, sourcePreview);
+    } else if (currentEolLabel) {
+      placeHolder = t("Current: {0} / {1} — Select target format", currentLabel, currentEolLabel);
+    } else {
+      placeHolder = t("Current: {0} — Select target format", currentLabel);
+    }
+  }
 
   return vscode.window.showQuickPick(items, {
     title: t("Select Target Format"),
@@ -950,7 +987,7 @@ async function resolveAutoSourceEncoding(
     classification.detectedEncoding
   ) {
     const detected = classification.detectedEncoding.toLowerCase();
-    if (detected === "shiftjis" || detected === "eucjp") {
+    if (isLegacyMultibyteEncoding(detected)) {
       const western =
         options.manualOverride && (openEncoding === "windows1252" || openEncoding === "iso88591")
           ? openEncoding
@@ -1002,7 +1039,12 @@ async function pickSingleSourceEncoding(
   const ruleEncoding = options.fileRuleEncoding?.toLowerCase();
   const openEncoding = options.openDocEncoding?.toLowerCase();
   const relevantUtf16 = new Set(
-    [utf16Signal, ruleEncoding, openEncoding].filter((value): value is string => !!value),
+    [
+      utf16Signal,
+      ruleEncoding,
+      openEncoding,
+      ...(classification.candidates?.map((id) => id.toLowerCase()) ?? []),
+    ].filter((value): value is string => !!value),
   );
   const candidateResults = new Map<string, string>();
   for (const entry of ENCODINGS) {
@@ -1073,18 +1115,22 @@ async function pickFolderSourceEncoding(
   title: string,
   excludedEncoding?: string,
   placeHolder?: string,
+  includeSourceOnly = false,
 ): Promise<string | undefined> {
+  const sourceEntries = includeSourceOnly ? [...ENCODINGS, ...SOURCE_ONLY_ENCODINGS] : ENCODINGS;
   const items = [
     {
       label: t("Auto-detect (uniquely identifiable files only)"),
-      description: t("auto · BOM, UTF-8, UTF-16, unambiguous Shift JIS / EUC-JP"),
+      description: t("auto · BOM, ISO-2022-JP, UTF-8, UTF-16, unambiguous legacy encodings"),
       encoding: AUTO_SOURCE,
     },
-    ...ENCODINGS.filter((encoding) => encoding.id !== excludedEncoding).map((encoding) => ({
-      label: encoding.label,
-      description: encoding.id,
-      encoding: encoding.id,
-    })),
+    ...sourceEntries
+      .filter((encoding) => encoding.id !== excludedEncoding)
+      .map((encoding) => ({
+        label: encoding.label,
+        description: encoding.id,
+        encoding: encoding.id,
+      })),
   ];
   const choice = await vscode.window.showQuickPick(items, { title, placeHolder });
   return choice?.encoding;

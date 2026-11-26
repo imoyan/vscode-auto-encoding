@@ -58,8 +58,13 @@ export async function reopenCleanDocument(uri: vscode.Uri, encoding: string): Pr
     (document) => document.uri.toString() === uri.toString(),
   );
   if (open && !open.isDirty) {
+    const reopenEncoding =
+      encoding.toLowerCase() === ISO2022JP_ENCODING
+        ? (vscode.workspace.getConfiguration?.("files", uri)?.get<string>("encoding", "utf8") ??
+          "utf8")
+        : encoding;
     try {
-      await vscode.workspace.openTextDocument(uri, { encoding });
+      await vscode.workspace.openTextDocument(uri, { encoding: reopenEncoding });
     } catch {
       // The bytes are already converted; a concurrent edit may prevent reopening.
     }

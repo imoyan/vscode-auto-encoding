@@ -24,6 +24,41 @@ export async function resolveRealPathWithin(
   }
 }
 
+/** Resolves a standalone local file's canonical parent directory and path while rejecting leaf symlinks. */
+export async function resolveStandaloneRegularFile(
+  filePath: string,
+): Promise<{ readonly parentRealPath: string; readonly fileRealPath: string } | undefined> {
+  if (!path.isAbsolute(filePath) || filePath.includes("\0")) {
+    return undefined;
+  }
+  try {
+    const beforeStat = await lstat(filePath, { bigint: true });
+    if (beforeStat.isSymbolicLink() || !beforeStat.isFile()) {
+      return undefined;
+    }
+    const parentRealPath = await resolveRealDirectory(path.dirname(filePath));
+    if (!parentRealPath) {
+      return undefined;
+    }
+    const fileRealPath = await resolveRealPathWithin(parentRealPath, filePath);
+    if (!fileRealPath || path.dirname(fileRealPath) !== parentRealPath) {
+      return undefined;
+    }
+    const afterStat = await lstat(fileRealPath, { bigint: true });
+    if (
+      afterStat.isSymbolicLink() ||
+      !afterStat.isFile() ||
+      afterStat.dev !== beforeStat.dev ||
+      afterStat.ino !== beforeStat.ino
+    ) {
+      return undefined;
+    }
+    return { parentRealPath, fileRealPath };
+  } catch {
+    return undefined;
+  }
+}
+
 export async function resolveMissingRecoveryPath(
   realRootPath: string,
   originalPath: string,

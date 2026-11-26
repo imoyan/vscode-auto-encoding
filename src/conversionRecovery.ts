@@ -5,6 +5,7 @@ import {
   LAST_BACKUP_KEY,
   PROTECTED_BACKUP_KEY,
   type BackupRecord,
+  activeConversionState,
   isConversionBackupSession,
   readBackupRecord,
   readBackupResource,
@@ -16,25 +17,36 @@ import { PinnedLocalFile, readPinnedLocalFile } from "./pinnedLocalFile.js";
 import {
   resolveRealDirectory,
   resolveRealPathWithin,
+  resolveStandaloneRegularFile,
 } from "./localPathSafety.js";
 
 const LEGACY_BACKUP_LIMIT = 100 * 1024 * 1024;
 const LEGACY_CONVERTED_LIMIT = 320 * 1024 * 1024;
 
+interface ResolvedRecoveryTarget {
+  readonly rootRealPath?: string;
+  readonly conversionRootRealPath?: string;
+  readonly resolvedUri?: vscode.Uri;
+  readonly standalone: boolean;
+  readonly manualRecoveryRequired: boolean;
+}
+
 /** Called inside ConversionManager's exclusive gate shared by conversion and restore. */
 export async function restoreLastConversion(
   context: vscode.ExtensionContext,
   onFilesChanged: () => void,
-  stored: string | undefined = context.workspaceState.get<string>(LAST_BACKUP_KEY),
+  stored?: string | null,
   onFileTouched: (uri: vscode.Uri) => void = () => undefined,
   backup = { lastKey: LAST_BACKUP_KEY, protectedKey: PROTECTED_BACKUP_KEY, protectSkipped: true },
+  state: vscode.Memento = activeConversionState(context),
 ): Promise<boolean> {
   const { lastKey, protectedKey } = backup;
-  if (!stored) {
+  const sessionString = stored === undefined ? state.get<string>(lastKey) : stored;
+  if (!sessionString) {
     void vscode.window.showInformationMessage(t("No previous conversion to undo in this workspace."));
     return false;
   }
-  const sessionUri = vscode.Uri.parse(stored);
+  const sessionUri = vscode.Uri.parse(sessionString);
   if (!(await isConversionBackupSession(context.globalStorageUri, sessionUri))) {
     void vscode.window.showErrorMessage(t("Invalid conversion backup location."));
     return false;
@@ -75,27 +87,15 @@ export async function restoreLastConversion(
           skipped += 1;
           continue;
         }
-        const workspaceRootRealPath = await resolveOpenWorkspaceRoot(record, originalUri);
-        const storedConversionRoot = record.conversionRootUri
-          ? vscode.Uri.parse(record.conversionRootUri)
-          : undefined;
-        const conversionRootRealPath =
-          workspaceRootRealPath && storedConversionRoot
-            ? storedConversionRoot.scheme === "file"
-              ? await resolveRealPathWithin(workspaceRootRealPath, storedConversionRoot.fsPath)
-              : undefined
-            : workspaceRootRealPath;
-        const resolvedPath = conversionRootRealPath
-          ? await resolveRealPathWithin(conversionRootRealPath, originalUri.fsPath)
-          : undefined;
-        const resolvedUri = resolvedPath ? vscode.Uri.file(resolvedPath) : undefined;
-        if (workspaceRootRealPath && conversionRootRealPath && !resolvedUri) {
+        const target = await resolveRecoveryTarget(record, originalUri);
+        const { rootRealPath, conversionRootRealPath, resolvedUri } = target;
+        if (target.manualRecoveryRequired) {
           failed += 1;
           manualRecoveryRequired = true;
           continue;
         }
         if (
-          !workspaceRootRealPath ||
+          !rootRealPath ||
           !conversionRootRealPath ||
           !resolvedUri ||
           (record.resolvedUri !== undefined && record.resolvedUri !== resolvedUri.toString()) ||
@@ -110,7 +110,7 @@ export async function restoreLastConversion(
           LEGACY_CONVERTED_LIMIT,
         );
         const current = await readPinnedLocalFile(
-          workspaceRootRealPath,
+          rootRealPath,
           resolvedUri.fsPath,
           maxSize,
         );
@@ -148,7 +148,7 @@ export async function restoreLastConversion(
           continue;
         }
         file = await PinnedLocalFile.open(
-          workspaceRootRealPath,
+          rootRealPath,
           resolvedUri.fsPath,
           maxSize,
           true,
@@ -163,14 +163,14 @@ export async function restoreLastConversion(
           continue;
         }
         const recordUri = vscode.Uri.joinPath(sessionUri, recordName);
-        const previousProtection = context.workspaceState.get<string>(protectedKey);
+        const previousProtection = state.get<string>(protectedKey);
         let writeMayHaveStarted = false;
         try {
-          await context.workspaceState.update(protectedKey, stored);
+          await state.update(protectedKey, sessionString);
           await writeJsonAtomic(recordUri, { ...record, recoveryRequired: true });
           if (
             isDirty(originalUri, resolvedUri) ||
-            (await resolveRealPathWithin(conversionRootRealPath, originalUri.fsPath)) !== resolvedUri.fsPath ||
+            !(await recoveryTargetPathIsCurrent(target, originalUri, resolvedUri)) ||
             !(await file.isCurrent()) ||
             isDirty(originalUri, resolvedUri)
           ) {
@@ -186,7 +186,7 @@ export async function restoreLastConversion(
         } finally {
           if (!writeMayHaveStarted) {
             await writeJsonAtomic(recordUri, record);
-            await context.workspaceState.update(protectedKey, previousProtection);
+            await state.update(protectedKey, previousProtection);
           }
         }
         onFileTouched(originalUri);
@@ -205,13 +205,13 @@ export async function restoreLastConversion(
   }
 
   if (recordCount > 0 && restored + alreadyRestored === recordCount) {
-    await context.workspaceState.update(lastKey, undefined);
-    if (context.workspaceState.get<string>(protectedKey) === stored) {
-      await context.workspaceState.update(protectedKey, undefined);
+    await state.update(lastKey, undefined);
+    if (state.get<string>(protectedKey) === sessionString) {
+      await state.update(protectedKey, undefined);
     }
     await deleteStoredBackupSession(context.globalStorageUri, sessionUri.toString());
   } else if (recordCount > 0 && backup.protectSkipped) {
-    await context.workspaceState.update(protectedKey, stored);
+    await state.update(protectedKey, sessionString);
   }
   if (manualRecoveryRequired) {
     void vscode.window.showErrorMessage(
@@ -230,6 +230,85 @@ export async function restoreLastConversion(
     onFilesChanged();
   }
   return restored > 0;
+}
+
+async function resolveRecoveryTarget(
+  record: BackupRecord,
+  originalUri: vscode.Uri,
+): Promise<ResolvedRecoveryTarget> {
+  if (record.standalone) {
+    if (!record.conversionRootUri || !record.resolvedUri) {
+      return { standalone: true, manualRecoveryRequired: false };
+    }
+    const storedRoot = vscode.Uri.parse(record.conversionRootUri);
+    const conversionRootRealPath =
+      storedRoot.scheme === "file" ? await resolveRealDirectory(storedRoot.fsPath) : undefined;
+    if (!conversionRootRealPath) {
+      return { standalone: true, manualRecoveryRequired: false };
+    }
+    const standaloneFile = await resolveStandaloneRegularFile(originalUri.fsPath);
+    if (!standaloneFile || standaloneFile.parentRealPath !== conversionRootRealPath) {
+      return {
+        rootRealPath: conversionRootRealPath,
+        conversionRootRealPath,
+        standalone: true,
+        manualRecoveryRequired: true,
+      };
+    }
+    return {
+      rootRealPath: conversionRootRealPath,
+      conversionRootRealPath,
+      resolvedUri: vscode.Uri.file(standaloneFile.fileRealPath),
+      standalone: true,
+      manualRecoveryRequired: false,
+    };
+  }
+
+  const workspaceRootRealPath = await resolveOpenWorkspaceRoot(record, originalUri);
+  const storedConversionRoot = record.conversionRootUri
+    ? vscode.Uri.parse(record.conversionRootUri)
+    : undefined;
+  const conversionRootRealPath =
+    workspaceRootRealPath && storedConversionRoot
+      ? storedConversionRoot.scheme === "file"
+        ? await resolveRealPathWithin(workspaceRootRealPath, storedConversionRoot.fsPath)
+        : undefined
+      : workspaceRootRealPath;
+  const resolvedPath = conversionRootRealPath
+    ? await resolveRealPathWithin(conversionRootRealPath, originalUri.fsPath)
+    : undefined;
+  const resolvedUri = resolvedPath ? vscode.Uri.file(resolvedPath) : undefined;
+  return {
+    rootRealPath: workspaceRootRealPath,
+    conversionRootRealPath,
+    resolvedUri,
+    standalone: false,
+    manualRecoveryRequired: Boolean(
+      workspaceRootRealPath && conversionRootRealPath && !resolvedUri,
+    ),
+  };
+}
+
+async function recoveryTargetPathIsCurrent(
+  target: ResolvedRecoveryTarget,
+  originalUri: vscode.Uri,
+  resolvedUri: vscode.Uri,
+): Promise<boolean> {
+  if (!target.conversionRootRealPath) {
+    return false;
+  }
+  if (target.standalone) {
+    const resolved = await resolveStandaloneRegularFile(originalUri.fsPath);
+    return (
+      resolved !== undefined &&
+      resolved.parentRealPath === target.conversionRootRealPath &&
+      resolved.fileRealPath === resolvedUri.fsPath
+    );
+  }
+  return (
+    (await resolveRealPathWithin(target.conversionRootRealPath, originalUri.fsPath)) ===
+    resolvedUri.fsPath
+  );
 }
 
 async function resolveOpenWorkspaceRoot(

@@ -1,5 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, stat, writeFile, readFile, rename, readdir } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+  readFile,
+  rename,
+  readdir,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -12,13 +22,14 @@ import { classifyLineEndings, classifyTextLineEndings } from "../src/scanCore.js
 
 type Runtime = typeof import("../src/extension.js") &
   typeof import("../src/editorEncoding.js") &
-  typeof import("../src/conversionSelection.js");
+  typeof import("../src/conversionSelection.js") &
+  typeof import("../src/conversion.js");
 type Listener = (value: unknown) => unknown;
 
 const bundle = build({
   stdin: {
     contents:
-      'export { activate } from "./src/extension.ts"; export { inspectActiveFile } from "./src/editorEncoding.ts"; export { selectConversion } from "./src/conversionSelection.ts";',
+      'export { activate } from "./src/extension.ts"; export { inspectActiveFile } from "./src/editorEncoding.ts"; export { selectConversion } from "./src/conversionSelection.ts"; export { ConversionManager } from "./src/conversion.ts";',
     resolveDir: process.cwd(),
   },
   bundle: true,
@@ -100,6 +111,8 @@ async function harness(t: TestContext, input: Record<string, string | Uint8Array
   const configReads = new Map<string, number>();
   const configFailures: string[] = [];
   const state = new Map<string, unknown>();
+  const globalStateMap = new Map<string, unknown>();
+  let syncedKeys: readonly string[] | undefined;
   let beforeStateUpdate: ((key: string, value: unknown) => void) | undefined;
   const unreadableDirectories = new Set<string>();
   const messages: string[] = [];
@@ -329,9 +342,22 @@ async function harness(t: TestContext, input: Record<string, string | Uint8Array
       state.set(key, value);
     },
   };
+  const globalMemento = {
+    keys: () => [...globalStateMap.keys()],
+    get: (key: string) => globalStateMap.get(key),
+    update: async (key: string, value: unknown) => {
+      beforeStateUpdate?.(key, value);
+      if (value === undefined) globalStateMap.delete(key);
+      else globalStateMap.set(key, value);
+    },
+    setKeysForSync: (keys: readonly string[]) => {
+      syncedKeys = keys;
+    },
+  };
   const subscriptions: Array<{ dispose(): void }> = [];
   const context = {
     workspaceState: memento,
+    globalState: globalMemento,
     subscriptions,
     extensionPath: process.cwd(),
     globalStorageUri: Uri.file(path.join(root, "storage")),
@@ -347,6 +373,8 @@ async function harness(t: TestContext, input: Record<string, string | Uint8Array
     config,
     configFailures,
     state,
+    globalState: globalStateMap,
+    getSyncedKeys: () => syncedKeys,
     unreadableDirectories,
     messages,
     window,
@@ -592,15 +620,20 @@ test("Western single-byte ambiguity prompts source encoding and is never presele
   assert.ok(h.shownPicks.some((pick) => pick.items.some((item) => item.label === "western.txt")));
 });
 
-test("legacy save enforcement warns without rewriting successive saves", async (t) => {
+test("warnOnSave warns without rewriting successive saves and ignores removed enforceOnSave", async (t) => {
   const h = await harness(t, { "a.txt": "initial" });
   h.config.set("rules", [{ pattern: "**/*", encoding: "utf8bom" }]);
-  h.config.set("enforceOnSave", true);
-  h.config.set("warnOnSave", false);
   await h.save("a.txt", "first");
   await h.save("a.txt", "newest");
   assert.equal(await readFile(h.uri("a.txt").fsPath, "utf8"), "newest");
   assert.equal(h.messages.filter((message) => message.startsWith("Save warning:")).length, 2);
+
+  h.messages.length = 0;
+  h.config.set("enforceOnSave", true);
+  h.config.set("warnOnSave", false);
+  await h.save("a.txt", "quiet");
+  assert.equal(await readFile(h.uri("a.txt").fsPath, "utf8"), "quiet");
+  assert.equal(h.messages.filter((message) => message.startsWith("Save warning:")).length, 0);
 });
 
 test("single file conversion previews decoded ISO-2022-JP text, hides EOL-only presets, and converts to UTF-8", async (t) => {
@@ -1269,3 +1302,170 @@ test("folder auto source conversion handles mixed encodings, preserves ambiguous
   );
   assert.equal(await h.command("convertFolder", h.uri("batch")), false);
 });
+
+test("single file conversion previews non-ASCII lines across encodings, skips false BOM preview on ASCII, and enforces modal confirmation on ambiguous sources", async (t) => {
+  const sjisLf = Uint8Array.from([0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea, 0x0a]);
+  const asciiBom = Uint8Array.from([0xef, 0xbb, 0xbf, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x0a]);
+  const ambiguousEuc = Uint8Array.from([0xa4, 0xa2, 0xa4, 0xa4, 0x0a]);
+  const h = await harness(t, {
+    "ja.txt": sjisLf,
+    "ascii-bom.txt": asciiBom,
+    "ambig.txt": ambiguousEuc,
+  });
+  installMultiEncodingCodec(h);
+
+  // 1. Shift JIS single-file preset shows decoded non-ASCII preview and converts without modal confirmation.
+  h.picks.push((items: Record<string, unknown>[]) =>
+    items.find((item) => item.targetEncoding === "utf8" && !item.targetLineEnding),
+  );
+  assert.equal(await h.command("convertFile", h.uri("ja.txt")), true);
+  assert.match(String(h.shownPicks[0]?.placeHolder), /Preview: L1: 日本語/);
+  assert.deepEqual(
+    new Uint8Array(await readFile(h.uri("ja.txt").fsPath)),
+    new TextEncoder().encode("日本語\n"),
+  );
+
+  // 2. Pure ASCII with UTF-8 BOM strips U+FEFF so no false Preview is shown.
+  h.shownPicks.length = 0;
+  h.picks.push(() => undefined);
+  assert.equal(await h.command("convertFile", h.uri("ascii-bom.txt")), false);
+  assert.doesNotMatch(String(h.shownPicks[0]?.placeHolder), /Preview:/);
+
+  // 3. Ambiguous single file requires modal confirmation; cancelling aborts without modifying disk.
+  h.shownPicks.length = 0;
+  h.picks.push(
+    (items: Record<string, unknown>[]) =>
+      items.find((item) => item.targetEncoding === "utf8" && !item.targetLineEnding),
+    { encoding: "eucjp" },
+  );
+  // No "Convert" pushed into confirmations -> user cancels modal
+  assert.equal(await h.command("convertFile", h.uri("ambig.txt")), false);
+  assert.deepEqual(new Uint8Array(await readFile(h.uri("ambig.txt").fsPath)), ambiguousEuc);
+});
+
+test(
+  "outside-workspace single-file conversion and Undo work in workspace and empty windows while rejecting leaf symlinks and folder operations",
+  { skip: process.platform === "win32" ? "symlink permissions vary on Windows" : false },
+  async (t) => {
+    const h = await harness(t, { "in-ws.txt": "inside\n" });
+    installMultiEncodingCodec(h);
+    assert.equal(h.getSyncedKeys()?.length, 0);
+
+    const externalRoot = await mkdtemp(path.join(tmpdir(), "outside-ws-conversion-"));
+    t.after(() => rm(externalRoot, { recursive: true, force: true }));
+    const realSubdir = path.join(externalRoot, "real-worktree");
+    const symlinkedParent = path.join(externalRoot, "linked-worktree");
+    await mkdir(realSubdir, { recursive: true });
+    await symlink(realSubdir, symlinkedParent, "dir");
+
+    const sjisBytes = Uint8Array.from([0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea, 0x0a]);
+    const jisBytes = Uint8Array.from([
+      0x1b, 0x24, 0x42, 0x46, 0x7c, 0x4b, 0x5c, 0x38, 0x6c, 0x1b, 0x28, 0x42, 0x0a,
+    ]);
+    const extSjisPath = path.join(symlinkedParent, "ext-sjis.txt");
+    const extJisPath = path.join(realSubdir, "ext-jis.txt");
+    const leafSymlinkPath = path.join(realSubdir, "leaf-link.txt");
+    await writeFile(extSjisPath, sjisBytes);
+    await writeFile(extJisPath, jisBytes);
+    await symlink(path.join(realSubdir, "ext-sjis.txt"), leafSymlinkPath);
+
+    const extSjisUri = h.uri(extSjisPath);
+    extSjisUri.fsPath = extSjisPath;
+    extSjisUri.path = extSjisPath;
+    const extJisUri = h.uri(extJisPath);
+    extJisUri.fsPath = extJisPath;
+    extJisUri.path = extJisPath;
+    const leafSymlinkUri = h.uri(leafSymlinkPath);
+    leafSymlinkUri.fsPath = leafSymlinkPath;
+    leafSymlinkUri.path = leafSymlinkPath;
+    const externalFolderUri = h.uri(realSubdir);
+    externalFolderUri.fsPath = realSubdir;
+    externalFolderUri.path = realSubdir;
+
+    // 1. Leaf symlink outside workspace is rejected; folder conversion & rule setup outside workspace stay blocked.
+    assert.equal(await h.command("convertFile", leafSymlinkUri, "utf8"), false);
+    assert.equal(await h.command("convertFolder", externalFolderUri), false);
+    assert.equal(await h.command("configureFile", extSjisUri), false);
+
+    // 2. Outside-workspace file via symlinked parent converts + undoes in an open workspace window (stored in workspaceState).
+    h.picks.push((items: Record<string, unknown>[]) =>
+      items.find((item) => item.targetEncoding === "utf8" && !item.targetLineEnding),
+    );
+    assert.equal(await h.command("convertFile", extSjisUri), true);
+    assert.equal(typeof h.state.get(LAST), "string");
+    assert.equal(h.globalState.get(LAST), undefined);
+    assert.deepEqual(
+      new Uint8Array(await readFile(extSjisPath)),
+      new TextEncoder().encode("日本語\n"),
+    );
+    h.confirmations.push("Undo");
+    assert.equal(await h.command("undoLastConversion"), true);
+    assert.deepEqual(new Uint8Array(await readFile(extSjisPath)), sjisBytes);
+    assert.equal(h.state.get(LAST), undefined);
+
+    // 3. Empty window (no workspaceFolders) converts ISO-2022-JP outside-workspace file and undoes via window-scoped globalState.
+    h.workspace.workspaceFolders = [];
+    h.foldersChanged();
+    h.picks.push((items: Record<string, unknown>[]) =>
+      items.find((item) => item.targetEncoding === "utf8" && !item.targetLineEnding),
+    );
+    assert.equal(await h.command("convertFile", extJisUri), true);
+    const windowId = h.state.get("autoEncoding.emptyWindowId") as string;
+    assert.equal(typeof windowId, "string");
+    assert.equal(typeof h.globalState.get(`${LAST}:${windowId}`), "string");
+    assert.deepEqual(
+      new Uint8Array(await readFile(extJisPath)),
+      new TextEncoder().encode("日本語\n"),
+    );
+
+    // Simulate a second concurrent empty window sharing globalState + globalStorageUri: it must NOT delete Window 1's backup!
+    const otherEmptyWindowState = new Map<string, unknown>();
+    const otherContext = {
+      workspaceState: {
+        get: (key: string) => otherEmptyWindowState.get(key),
+        update: async (key: string, value: unknown) => {
+          if (value === undefined) otherEmptyWindowState.delete(key);
+          else otherEmptyWindowState.set(key, value);
+        },
+      },
+      globalState: {
+        keys: () => [...h.globalState.keys()],
+        get: (key: string) => h.globalState.get(key),
+        update: async (key: string, value: unknown) => {
+          if (value === undefined) h.globalState.delete(key);
+          else h.globalState.set(key, value);
+        },
+        setKeysForSync: () => undefined,
+      },
+      subscriptions: [] as Array<{ dispose(): void }>,
+      extensionPath: process.cwd(),
+      globalStorageUri: Uri.file(path.join(h.uri("storage").fsPath)),
+    } as unknown as import("vscode").ExtensionContext;
+    await writeFile(extSjisPath, sjisBytes);
+    const secondManager = new h.runtime.ConversionManager(
+      otherContext,
+      () => undefined,
+      () => h.workspace.getConfiguration() as unknown as import("vscode").WorkspaceConfiguration,
+    );
+    assert.equal(await secondManager.convertFile(extSjisUri as unknown as import("vscode").Uri, "utf8"), true);
+    const secondWindowId = otherEmptyWindowState.get("autoEncoding.emptyWindowId") as string;
+    assert.notEqual(secondWindowId, windowId);
+    assert.equal(typeof h.globalState.get(`${LAST}:${windowId}`), "string");
+    assert.equal(typeof h.globalState.get(`${LAST}:${secondWindowId}`), "string");
+
+    // Window 1 undoes its own file without touching Window 2's file, and Window 2 undoes its own file cleanly
+    h.confirmations.push("Undo");
+    assert.equal(await h.command("undoLastConversion"), true);
+    assert.deepEqual(new Uint8Array(await readFile(extJisPath)), jisBytes);
+    assert.deepEqual(
+      new Uint8Array(await readFile(extSjisPath)),
+      new TextEncoder().encode("日本語\n"),
+    );
+    assert.equal(h.globalState.get(`${LAST}:${windowId}`), undefined);
+
+    h.confirmations.push("Undo");
+    assert.equal(await secondManager.undoLastConversion(), true);
+    assert.deepEqual(new Uint8Array(await readFile(extSjisPath)), sjisBytes);
+    assert.equal(h.globalState.get(`${LAST}:${secondWindowId}`), undefined);
+  },
+);

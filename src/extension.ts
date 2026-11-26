@@ -48,6 +48,7 @@ import {
 import { configureFolder } from "./ruleCommands.js";
 
 export function activate(context: vscode.ExtensionContext): void {
+  context.globalState?.setKeysForSync?.([]);
   const pendingOperationUris = new Map<string, vscode.Uri>();
   const decorationProvider = new EncodingDecorationProvider();
   const diagnostics = vscode.languages.createDiagnosticCollection("autoEncoding");
@@ -425,9 +426,30 @@ export function activate(context: vscode.ExtensionContext): void {
           return undefined;
         }
         warned.set(key, warningKey);
+        const targetRuleEncoding = match.rule.encoding;
+        const convertAction = isSupportedEncoding(targetRuleEncoding)
+          ? t("Convert to {0} and Save", encodingInfo(targetRuleEncoding).label)
+          : undefined;
         const message = `${documentBasename(currentDoc)}: ${UNCONFIRMED_RULE_MESSAGE}`;
+        const notice = convertAction
+          ? vscode.window.showWarningMessage(message, convertAction)
+          : vscode.window.showWarningMessage(message);
         return async () => {
-          await vscode.window.showWarningMessage(message);
+          if (convertAction && (await notice) === convertAction) {
+            const targetDoc = findOpenDocument(document.uri) ?? currentDoc;
+            if (targetDoc.isClosed) return;
+            const latestMatch = resolveRule(targetDoc.uri);
+            if (!latestMatch || isDocumentEncodingMatch(targetDoc, latestMatch)) {
+              warned.delete(key);
+              updateDocumentState(targetDoc);
+              return;
+            }
+            await vscode.commands.executeCommand(
+              "autoEncoding.convertFile",
+              targetDoc.uri,
+              latestMatch.rule.encoding,
+            );
+          }
         };
       }
     }
@@ -821,7 +843,7 @@ export function activate(context: vscode.ExtensionContext): void {
         const filename = documentBasename(document);
         const details: string[] = [];
         const ruleMismatched = !!match && !isDocumentEncodingMatch(document, match);
-        if ((warnOnSave || config.get("enforceOnSave", false)) && ruleMismatched) {
+        if (warnOnSave && ruleMismatched) {
           details.push(
             t(
               "{0} is open as {1}, while the configured encoding rule is {2}.",

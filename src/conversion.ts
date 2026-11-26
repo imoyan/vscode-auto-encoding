@@ -12,7 +12,9 @@ import {
   LAST_BACKUP_KEY,
   PROTECTED_BACKUP_KEY,
   type BackupRecord,
+  activeConversionState,
   isConversionBackupSession,
+  pruneEmptyWindowBackups,
   writeJsonAtomic,
   deleteIfPresent,
   deleteStoredBackupSession,
@@ -22,7 +24,7 @@ import { restoreLastConversion } from "./conversionRecovery.js";
 import { prepareConversion, isDirty, hashBytes, reopenCleanDocument } from "./conversionResources.js";
 import { encodingInfo } from "./rules.js";
 import { PinnedLocalFile } from "./pinnedLocalFile.js";
-import { resolveRealPathWithin } from "./localPathSafety.js";
+import { resolveRealPathWithin, resolveStandaloneRegularFile } from "./localPathSafety.js";
 
 interface ConversionCounts {
   converted: number;
@@ -49,6 +51,7 @@ interface ConversionRunResult {
 }
 
 interface PointerRollback {
+  readonly state: vscode.Memento;
   readonly failedSession: string;
   readonly previousSession: string | undefined;
   readonly protectedPreviousSession: string | undefined;
@@ -69,9 +72,10 @@ export class ConversionManager {
   ) {}
 
   public async notifyProtectedConversion(): Promise<void> {
+    const state = activeConversionState(this.context);
     const stored = protectedConversionSession(
-      this.context.workspaceState.get<unknown>(LAST_BACKUP_KEY),
-      this.context.workspaceState.get<unknown>(PROTECTED_BACKUP_KEY),
+      state.get<unknown>(LAST_BACKUP_KEY),
+      state.get<unknown>(PROTECTED_BACKUP_KEY),
     );
     if (!stored) {
       return;
@@ -278,11 +282,14 @@ export class ConversionManager {
     return (
       (await this.runExclusive(async () => {
         await this.repairPendingPointerRollback();
+        const state = activeConversionState(this.context);
         return restoreLastConversion(
           this.context,
           () => this.onFilesChanged(),
-          this.undoTarget(),
+          this.undoTarget(state) ?? null,
           (uri) => this.onFileTouched(uri),
+          undefined,
+          state,
         );
       })) ?? false
     );
@@ -292,7 +299,8 @@ export class ConversionManager {
     return (
       (await this.runExclusive(async () => {
         await this.repairPendingPointerRollback();
-        if (this.undoTarget() !== expectedSession) {
+        const state = activeConversionState(this.context);
+        if (this.undoTarget(state) !== expectedSession) {
           void vscode.window.showInformationMessage(
             t("Another conversion occurred after this notification, so the older conversion was not undone."),
           );
@@ -303,15 +311,21 @@ export class ConversionManager {
           () => this.onFilesChanged(),
           expectedSession,
           (uri) => this.onFileTouched(uri),
+          undefined,
+          state,
         );
       })) ?? false
     );
   }
 
-  private undoTarget(): string | undefined {
-    const last = this.context.workspaceState.get<string>(LAST_BACKUP_KEY);
+  private undoTarget(
+    state: vscode.Memento = activeConversionState(this.context),
+  ): string | undefined {
+    const last = state.get<string>(LAST_BACKUP_KEY);
     const pending = this.pendingPointerRollback;
-    return pending && last === pending.failedSession ? pending.previousSession : last;
+    return pending && pending.state === state && last === pending.failedSession
+      ? pending.previousSession
+      : last;
   }
 
   private async repairPendingPointerRollback(): Promise<void> {
@@ -321,7 +335,7 @@ export class ConversionManager {
   }
 
   private async rollbackPointers(rollback: PointerRollback): Promise<boolean> {
-    const state = this.context.workspaceState;
+    const { state } = rollback;
     let saved = true;
     if (state.get<string>(LAST_BACKUP_KEY) === rollback.failedSession) {
       try {
@@ -366,18 +380,19 @@ export class ConversionManager {
     targetLineEnding?: "lf" | "crlf",
   ): Promise<ConversionRunResult> {
     await this.repairPendingPointerRollback();
+    const state = activeConversionState(this.context);
     const stuck =
       this.pendingPointerRollback &&
-      this.context.workspaceState.get<string>(LAST_BACKUP_KEY) ===
-        this.pendingPointerRollback.failedSession
+      this.pendingPointerRollback.state === state &&
+      state.get<string>(LAST_BACKUP_KEY) === this.pendingPointerRollback.failedSession
         ? this.pendingPointerRollback
         : undefined;
     const previousSession = stuck
       ? stuck.previousSession
-      : this.context.workspaceState.get<string>(LAST_BACKUP_KEY);
+      : state.get<string>(LAST_BACKUP_KEY);
     const protectedPreviousSession = stuck
       ? stuck.protectedPreviousSession
-      : this.context.workspaceState.get<string>(PROTECTED_BACKUP_KEY);
+      : state.get<string>(PROTECTED_BACKUP_KEY);
     const timestamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
     const sessionUri = vscode.Uri.joinPath(
       this.context.globalStorageUri,
@@ -466,7 +481,11 @@ export class ConversionManager {
               originalUri: candidate.uri.toString(),
               resolvedUri: candidate.writeUri.toString(),
               conversionRootUri: vscode.Uri.file(candidate.conversionRootRealPath).toString(),
-              workspaceRootUri: vscode.Uri.file(candidate.workspaceRootRealPath).toString(),
+              ...(candidate.standalone
+                ? { standalone: true }
+                : {
+                    workspaceRootUri: vscode.Uri.file(candidate.workspaceRootRealPath).toString(),
+                  }),
               relativePath: candidate.relativePath,
               backupFile,
               originalHash: candidate.originalHash,
@@ -486,18 +505,12 @@ export class ConversionManager {
                 (await file!.isCurrent()),
               registerBackup: async () => {
                 if (!backupRegistered) {
-                  await this.context.workspaceState.update(
-                    LAST_BACKUP_KEY,
-                    sessionUri.toString(),
-                  );
+                  await state.update(LAST_BACKUP_KEY, sessionUri.toString());
                   backupRegistered = true;
                 }
               },
               markTargetStarted: async () => {
-                await this.context.workspaceState.update(
-                  PROTECTED_BACKUP_KEY,
-                  sessionUri.toString(),
-                );
+                await state.update(PROTECTED_BACKUP_KEY, sessionUri.toString());
                 await writeJsonAtomic(recordUri, { ...record, recoveryRequired: true });
               },
               writeTarget: async () => file!.writeConverted(prepared.converted),
@@ -506,11 +519,8 @@ export class ConversionManager {
               },
               markTargetCompleted: async () => {
                 await writeJsonAtomic(recordUri, record);
-                if (
-                  this.context.workspaceState.get<string>(PROTECTED_BACKUP_KEY) ===
-                  sessionUri.toString()
-                ) {
-                  await this.context.workspaceState.update(PROTECTED_BACKUP_KEY, undefined);
+                if (state.get<string>(PROTECTED_BACKUP_KEY) === sessionUri.toString()) {
+                  await state.update(PROTECTED_BACKUP_KEY, undefined);
                 }
               },
               cleanupBackup: async () => {
@@ -552,8 +562,10 @@ export class ConversionManager {
         if (previousSession !== protectedPreviousSession) {
           await deleteStoredBackupSession(this.context.globalStorageUri, previousSession);
         }
+        await pruneEmptyWindowBackups(this.context);
       } else if (disposition === "restorePreviousAndDeleteNew") {
         pointerRollbackFailed = !(await this.rollbackPointers({
+          state,
           failedSession: sessionUri.toString(),
           previousSession,
           protectedPreviousSession,
@@ -562,9 +574,9 @@ export class ConversionManager {
         await deleteStoredBackupSession(this.context.globalStorageUri, sessionUri.toString());
       }
       if (recoveryRequired) {
-        await this.context.workspaceState.update(PROTECTED_BACKUP_KEY, sessionUri.toString());
+        await state.update(PROTECTED_BACKUP_KEY, sessionUri.toString());
       } else if (counts.converted > 0 && protectedPreviousSession === previousSession) {
-        await this.context.workspaceState.update(PROTECTED_BACKUP_KEY, undefined);
+        await state.update(PROTECTED_BACKUP_KEY, undefined);
       }
     } catch {
       backupManagementFailed = true;
@@ -595,6 +607,14 @@ export class ConversionManager {
 }
 
 async function candidatePathIsCurrent(candidate: ConversionCandidate): Promise<boolean> {
+  if (candidate.standalone) {
+    const resolved = await resolveStandaloneRegularFile(candidate.uri.fsPath);
+    return (
+      resolved !== undefined &&
+      resolved.parentRealPath === candidate.conversionRootRealPath &&
+      resolved.fileRealPath === candidate.writeUri.fsPath
+    );
+  }
   return (
     (await resolveRealPathWithin(candidate.conversionRootRealPath, candidate.uri.fsPath)) ===
     candidate.writeUri.fsPath

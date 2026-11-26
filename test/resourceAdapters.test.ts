@@ -78,6 +78,12 @@ test("conversion refresh only reloads an already-open clean document", async () 
   await resources.reopenCleanDocument(uri, "utf8");
   assert.equal(calls.length, 1);
   assert.equal(calls[0]![0], uri);
+  assert.equal((calls[0]![1] as { encoding: string }).encoding, "utf8");
+
+  // Source-only ISO-2022-JP falls back to utf8 so Undo reloads restored bytes cleanly
+  await resources.reopenCleanDocument(uri, "iso2022jp");
+  assert.equal(calls.length, 2);
+  assert.equal((calls[1]![1] as { encoding: string }).encoding, "utf8");
 });
 
 test("Explorer badge setting gates rule badges cleanly", () => {
@@ -120,6 +126,7 @@ test("malformed backup JSON is ignored as an invalid record", async () => {
   let bytes = Buffer.from('{"version":');
   const backup = loadModule<{ readBackupRecord(uri: unknown): Promise<unknown> }>("conversionBackup.ts", {
     "node:crypto": {},
+    "node:path": path,
     vscode: {},
     "./conversionCore.js": {},
     "./localPathSafety.js": {},
@@ -207,6 +214,7 @@ test("undo retains recovery state, rejects replacements and clears read-only com
     "./conversionBackup.js": {
       LAST_BACKUP_KEY: "last",
       PROTECTED_BACKUP_KEY: "protected",
+      activeConversionState: (ctx: { workspaceState: unknown }) => ctx.workspaceState,
       isConversionBackupSession: () => true,
       readBackupRecord: async () => record,
       readBackupResource: async () => ({ bytes: Buffer.from("original") }),
@@ -261,6 +269,10 @@ test("undo retains recovery state, rejects replacements and clears read-only com
     "./localPathSafety.js": {
       resolveRealDirectory: async (value: string) => value,
       resolveRealPathWithin: async (_root: string, value: string) => value,
+      resolveStandaloneRegularFile: async (value: string) => ({
+        parentRealPath: path.dirname(value),
+        fileRealPath: value,
+      }),
     },
   });
   const context = {
@@ -336,6 +348,7 @@ test("file-backed UNC storage reaches filesystem containment checks", async () =
     "conversionBackup.ts",
     {
       "node:crypto": {},
+      "node:path": path,
       vscode: { env: {} },
       "./conversionCore.js": {},
       "./stableResourceRead.js": {},
@@ -360,6 +373,68 @@ test("file-backed UNC storage reaches filesystem containment checks", async () =
     false,
   );
   assert.equal(checks, 1);
+});
+
+test("activeConversionState uses workspaceState when folders are open and isolates empty windows in globalState", async () => {
+  let workspaceFolders: unknown[] | undefined = [{ name: "ws" }];
+  let counter = 0;
+  const backup = loadModule<{
+    activeConversionState(context: unknown): {
+      get(key: string): unknown;
+      update(key: string, value: unknown): Promise<void>;
+    };
+  }>("conversionBackup.ts", {
+    "node:crypto": {
+      randomUUID: () => `00000000-0000-4000-8000-${String(++counter).padStart(12, "0")}`,
+    },
+    "node:path": path,
+    vscode: {
+      workspace: {
+        get workspaceFolders() {
+          return workspaceFolders;
+        },
+      },
+    },
+    "./conversionCore.js": {},
+    "./stableResourceRead.js": {},
+    "./localPathSafety.js": {},
+  });
+  const makeMemento = () => {
+    const map = new Map<string, unknown>();
+    return {
+      map,
+      keys: () => [...map.keys()],
+      get: (key: string) => map.get(key),
+      update: async (key: string, value: unknown) => {
+        if (value === undefined) map.delete(key);
+        else map.set(key, value);
+      },
+    };
+  };
+  const wsStateA = makeMemento();
+  const wsStateB = makeMemento();
+  const sharedGlobalState = makeMemento();
+  const ctxA = { workspaceState: wsStateA, globalState: sharedGlobalState };
+  const ctxB = { workspaceState: wsStateB, globalState: sharedGlobalState };
+
+  assert.equal(backup.activeConversionState(ctxA), wsStateA);
+
+  workspaceFolders = [];
+  const scopedA = backup.activeConversionState(ctxA);
+  const scopedB = backup.activeConversionState(ctxB);
+  // Same window returns stable Memento reference; two empty windows never clobber each other's keys
+  assert.equal(backup.activeConversionState(ctxA), scopedA);
+  await scopedA.update("autoEncoding.lastConversionBackup", "session-A");
+  await scopedB.update("autoEncoding.lastConversionBackup", "session-B");
+  assert.equal(scopedA.get("autoEncoding.lastConversionBackup"), "session-A");
+  assert.equal(scopedB.get("autoEncoding.lastConversionBackup"), "session-B");
+
+  // Reloading window A (new context object sharing wsStateA) preserves its emptyWindowId and Undo pointer
+  const reloadedCtxA = { workspaceState: wsStateA, globalState: sharedGlobalState };
+  assert.equal(
+    backup.activeConversionState(reloadedCtxA).get("autoEncoding.lastConversionBackup"),
+    "session-A",
+  );
 });
 
 test("reopening a comparison side preserves both URIs and labels their encodings", async () => {

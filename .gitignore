@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.vsix
+SHA256SUMS
+.DS_Store
+__pycache__/
+*.pyc
+
+# Local release artifacts
+artifacts/

@@ -1,0 +1,18 @@
+name: Feature Request / Translation
+description: Suggest an improvement, new encoding, or UI translation
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What workflow or encoding issue are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior, setting, or language support you would like to see.
+    validations:
+      required: true

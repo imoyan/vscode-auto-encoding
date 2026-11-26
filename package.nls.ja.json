@@ -1,0 +1,22 @@
+{
+  "displayName": "Auto Encoding（文字コード自動判定・変換）",
+  "description": "通常ファイルもGit比較も文字化けせず自動で開き直し、フォルダーごとの文字コード設定やファイル・フォルダーの変換を1画面で安全に行います。",
+  "capabilities.virtualWorkspaces.description": "安全な上限付き読み込みのため、ローカルファイルのワークスペースで動作します。",
+  "command.inspectActiveFile": "Auto Encoding: 現在のファイルの文字コードを確認・開き直す",
+  "command.convertFile": "Auto Encoding: このファイルの文字コード・改行を変換して保存",
+  "command.convertFolder": "Auto Encoding: このフォルダー内のファイルを変換",
+  "command.undoLastConversion": "Auto Encoding: 直前の変換を元に戻す",
+  "command.configureFolder": "Auto Encoding: このフォルダーの文字コードを設定",
+  "command.configureFile": "Auto Encoding: このファイルの文字コードを設定",
+  "configuration.title": "Auto Encoding",
+  "config.rules.description": "ワークスペースフォルダーからの相対パス glob と期待する文字コードです。上から順に評価し、最初に一致したルールを使用します。",
+  "config.rules.pattern.description": "ワークスペースフォルダーからの相対 glob。例: legacy/**",
+  "config.autoReopen.description": "未編集のファイルを通常のエディターで開いたとき、ルール一致またはバイト列から一意に判定できた文字コードで自動的に開き直します（候補が複数ある曖昧な場合は自動変更せずステータスバーで案内します）。",
+  "config.autoReopenGitComparison.description": "Git比較（作業中・ステージ済み・コミット履歴・ファイル移動）や単体のGitファイル表示を開いたとき、文字コード設定・開いている作業ファイル・バイト列からの一意な自動判定にもとづいて自動的に開き直します。表示だけを変更し、ファイルは書き換えません。",
+  "config.warnOnOpen.description": "自動開き直しをオフにしている場合や、現在の文字コードで読み込み欠損があるファイルを開いた場合に通知します。",
+  "config.warnOnSave.description": "保存時に、文字コードの不一致・読み込み欠損、または編集中の内容に含まれる置換文字（U+FFFD）を通知します。通知は保存を停止しません。",
+  "config.showExplorerBadges.description": "文字コードを設定したフォルダーとルール対象のファイルに、エクスプローラー上で文字コードのバッジ（SJ・U8など）を表示します。",
+  "config.conversionExclude.description": "フォルダー内の既存ファイル一括変換で除外する glob です。",
+  "config.maxFileSizeKB.description": "文字コードの自動判定と変換の対象にする1ファイルあたりの最大サイズ（KiB、最大32 MiB）です。",
+  "config.maxScanFiles.description": "フォルダー内の一括変換で一度に確認する最大ファイル数です。"
+}

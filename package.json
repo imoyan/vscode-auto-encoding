@@ -1,0 +1,254 @@
+{
+  "name": "auto-encoding",
+  "displayName": "%displayName%",
+  "description": "%description%",
+  "version": "0.1.0",
+  "publisher": "imoyan",
+  "license": "MIT",
+  "author": {
+    "name": "imoyan",
+    "url": "https://github.com/imoyan"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/imoyan/vscode-auto-encoding.git"
+  },
+  "homepage": "https://github.com/imoyan/vscode-auto-encoding#readme",
+  "bugs": {
+    "url": "https://github.com/imoyan/vscode-auto-encoding/issues"
+  },
+  "qna": "https://github.com/imoyan/vscode-auto-encoding/issues",
+  "keywords": [
+    "encoding",
+    "charset",
+    "shift-jis",
+    "euc-jp",
+    "utf-8",
+    "git",
+    "diff",
+    "mojibake",
+    "line-ending",
+    "crlf",
+    "lf",
+    "auto-encoding"
+  ],
+  "categories": [
+    "Other",
+    "Formatters"
+  ],
+  "icon": "media/icon.png",
+  "l10n": "./l10n",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "capabilities": {
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "%capabilities.virtualWorkspaces.description%"
+    }
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "check": "tsc --noEmit && eslint src test tools && npm test",
+    "test": "tsx --test test/**/*.test.ts",
+    "package": "npm run check && npm run package:vsix",
+    "package:vsix": "npm run build && node tools/packageVsix.mjs",
+    "test:host": "node tools/testExtensionHost.mjs"
+  },
+  "dependencies": {
+    "minimatch": "11.0.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@types/node": "24.13.3",
+    "@types/vscode": "1.100.0",
+    "@vscode/vsce": "4.1.0",
+    "esbuild": "0.25.12",
+    "eslint": "9.39.5",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.69.0"
+  },
+  "overrides": {
+    "@vscode/vsce": {
+      "minimatch": "$minimatch"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "$minimatch"
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "autoEncoding.inspectActiveFile",
+        "title": "%command.inspectActiveFile%",
+        "icon": "$(pass)"
+      },
+      {
+        "command": "autoEncoding.convertFile",
+        "title": "%command.convertFile%"
+      },
+      {
+        "command": "autoEncoding.convertFolder",
+        "title": "%command.convertFolder%",
+        "icon": "$(replace-all)"
+      },
+      {
+        "command": "autoEncoding.undoLastConversion",
+        "title": "%command.undoLastConversion%",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "autoEncoding.configureFolder",
+        "title": "%command.configureFolder%",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "autoEncoding.configureFile",
+        "title": "%command.configureFile%",
+        "icon": "$(settings-gear)"
+      }
+    ],
+    "configuration": {
+      "title": "%configuration.title%",
+      "properties": {
+        "autoEncoding.rules": {
+          "type": "array",
+          "scope": "resource",
+          "default": [],
+          "markdownDescription": "%config.rules.description%",
+          "items": {
+            "type": "object",
+            "required": [
+              "pattern",
+              "encoding"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "pattern": {
+                "type": "string",
+                "description": "%config.rules.pattern.description%",
+                "maxLength": 512
+              },
+              "encoding": {
+                "type": "string",
+                "enum": [
+                  "utf8",
+                  "utf8bom",
+                  "shiftjis",
+                  "eucjp",
+                  "windows1252",
+                  "iso88591",
+                  "utf16le",
+                  "utf16be"
+                ]
+              }
+            }
+          },
+          "maxItems": 256
+        },
+        "autoEncoding.autoReopen": {
+          "type": "boolean",
+          "scope": "resource",
+          "default": true,
+          "description": "%config.autoReopen.description%"
+        },
+        "autoEncoding.autoReopenGitComparison": {
+          "type": "boolean",
+          "scope": "resource",
+          "default": true,
+          "markdownDescription": "%config.autoReopenGitComparison.description%"
+        },
+        "autoEncoding.warnOnOpen": {
+          "type": "boolean",
+          "scope": "resource",
+          "default": true,
+          "description": "%config.warnOnOpen.description%"
+        },
+        "autoEncoding.warnOnSave": {
+          "type": "boolean",
+          "scope": "resource",
+          "default": true,
+          "description": "%config.warnOnSave.description%"
+        },
+        "autoEncoding.showExplorerBadges": {
+          "type": "boolean",
+          "scope": "resource",
+          "default": true,
+          "description": "%config.showExplorerBadges.description%"
+        },
+        "autoEncoding.conversionExclude": {
+          "type": "string",
+          "scope": "resource",
+          "default": "**/{.git,.hg,.svn,.vscode,.idea,node_modules,.next,dist,build,.dart_tool}/**",
+          "description": "%config.conversionExclude.description%",
+          "maxLength": 512
+        },
+        "autoEncoding.maxFileSizeKB": {
+          "type": "integer",
+          "scope": "resource",
+          "default": 5120,
+          "minimum": 1,
+          "maximum": 32768,
+          "description": "%config.maxFileSizeKB.description%"
+        },
+        "autoEncoding.maxScanFiles": {
+          "type": "integer",
+          "scope": "resource",
+          "default": 5000,
+          "minimum": 1,
+          "maximum": 50000,
+          "description": "%config.maxScanFiles.description%"
+        }
+      }
+    },
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "autoEncoding.configureFolder",
+          "when": "resourceScheme == file && explorerResourceIsFolder",
+          "group": "7_modification@50"
+        },
+        {
+          "command": "autoEncoding.convertFolder",
+          "when": "resourceScheme == file && explorerResourceIsFolder",
+          "group": "7_modification@51"
+        },
+        {
+          "command": "autoEncoding.configureFile",
+          "when": "resourceScheme == file && !explorerResourceIsFolder",
+          "group": "7_modification@50"
+        },
+        {
+          "command": "autoEncoding.convertFile",
+          "when": "resourceScheme == file && !explorerResourceIsFolder",
+          "group": "7_modification@51"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "autoEncoding.inspectActiveFile",
+          "when": "resourceScheme == file",
+          "group": "3_preview@50"
+        },
+        {
+          "command": "autoEncoding.convertFile",
+          "when": "resourceScheme == file",
+          "group": "1_modification@50"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "autoEncoding.convertFile",
+          "when": "resourceScheme == file",
+          "group": "1_modification@50"
+        }
+      ]
+    }
+  }
+}

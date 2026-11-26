@@ -1,0 +1,36 @@
+name: Bug Report
+description: Report an unexpected behavior, mojibake issue, or error in Auto Encoding
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the bug clearly.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Please include the encoding(s), whether a folder/file rule was set, and whether it occurred in a regular editor or Git diff.
+      placeholder: |
+        1. Open a Shift JIS file in ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Environment
+      description: Extension version, VS Code version, and OS
+      placeholder: "Auto Encoding 0.1.0, VS Code 1.100.0, macOS 15"
+    validations:
+      required: true

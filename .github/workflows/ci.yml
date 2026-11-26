@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      windows_acceptance:
+        description: Run additional Windows verification
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify & Package VSIX (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Test gitleaks check boundary
+        run: python3 -m unittest discover -s tools -p 'test_check_gitleaks.py'
+      - name: Test VSIX privacy check
+        run: python3 -m unittest discover -s tools -p 'test_vsix_privacy.py'
+      - name: Scan git history with pinned gitleaks
+        run: python3 tools/check_gitleaks.py
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies from lockfile
+        run: npm ci --ignore-scripts
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+      - name: Verify types, lint, and unit tests
+        run: npm run check
+      - name: Verify l10n key parity
+        run: |
+          python3 -c '
+          import json
+          for a, b in [("package.nls.json", "package.nls.ja.json"), ("l10n/bundle.l10n.json", "l10n/bundle.l10n.ja.json")]:
+              da, db = json.load(open(a)), json.load(open(b))
+              assert set(da) == set(db), f"Key mismatch between {a} and {b}"
+          '
+      - name: Package and verify universal VSIX
+        shell: bash
+        run: |
+          rm -f auto-encoding-*.vsix SHA256SUMS
+          node esbuild.mjs
+          node tools/packageVsix.mjs
+          shopt -s nullglob
+          packages=(auto-encoding-*.vsix)
+          test "${#packages[@]}" -eq 1
+          python3 tools/check_vsix_privacy.py "${packages[0]}"
+          sha256sum "${packages[0]}" > SHA256SUMS
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: auto-encoding-vsix
+          path: |
+            auto-encoding-*.vsix
+            SHA256SUMS
+          if-no-files-found: error
+
+  extension-host:
+    name: VS Code Extension Host (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies from lockfile
+        run: npm ci --ignore-scripts
+      - name: Ensure VS Code is installed
+        run: |
+          if [ ! -d '/Applications/Visual Studio Code.app' ]; then
+            brew install --cask visual-studio-code
+          fi
+      - name: Run Extension Host E2E tests
+        run: npm run test:host
+
+  windows-acceptance:
+    name: Windows Additional Verification (Optional)
+    if: github.event_name == 'workflow_dispatch' && inputs.windows_acceptance
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies from lockfile
+        run: npm ci --ignore-scripts
+      - name: Run Windows file I/O and conversion tests
+        run: node --import tsx --test --test-concurrency=1 test/pinnedLocalFile.test.ts test/conversionCore.test.ts test/localPathSafety.test.ts test/rules.test.ts test/boundedGlob.test.ts test/scanCore.test.ts test/candidatePreview.test.ts
+      - name: Package VSIX
+        run: npm run package:vsix
+      - name: Upload Windows VSIX artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: auto-encoding-windows-vsix
+          path: auto-encoding-*.vsix
+          if-no-files-found: error

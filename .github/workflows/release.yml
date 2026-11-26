@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build, Attest & Publish GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Verify tag matches package.json version
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          test "$tag_version" = "$pkg_version"
+      - name: Install dependencies from lockfile
+        run: npm ci --ignore-scripts
+      - name: Verify types, lint, and unit tests
+        run: npm run check
+      - name: Package and verify universal VSIX
+        shell: bash
+        run: |
+          rm -f auto-encoding-*.vsix SHA256SUMS
+          node esbuild.mjs
+          node tools/packageVsix.mjs
+          shopt -s nullglob
+          packages=(auto-encoding-*.vsix)
+          test "${#packages[@]}" -eq 1
+          python3 tools/check_vsix_privacy.py "${packages[0]}"
+          sha256sum "${packages[0]}" > SHA256SUMS
+      - name: Generate artifact build provenance attestation
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: auto-encoding-*.vsix
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          generate_release_notes: true
+          files: |
+            auto-encoding-*.vsix
+            SHA256SUMS

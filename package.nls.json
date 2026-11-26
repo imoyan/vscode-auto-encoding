@@ -1,0 +1,22 @@
+{
+  "displayName": "Auto Encoding",
+  "description": "Automatically reopen files and Git diffs in the right encoding without mojibake, manage per-folder encoding rules, and safely convert encodings and line endings in one step.",
+  "capabilities.virtualWorkspaces.description": "Operates on local file workspaces for bounded, safe file reads.",
+  "command.inspectActiveFile": "Auto Encoding: Check / Reopen Current File Encoding",
+  "command.convertFile": "Auto Encoding: Convert File Encoding & Line Endings",
+  "command.convertFolder": "Auto Encoding: Convert Files in Folder",
+  "command.undoLastConversion": "Auto Encoding: Undo Last Conversion",
+  "command.configureFolder": "Auto Encoding: Set Folder Encoding",
+  "command.configureFile": "Auto Encoding: Set File Encoding",
+  "configuration.title": "Auto Encoding",
+  "config.rules.description": "Workspace-relative glob patterns and expected encodings. Evaluated from top to bottom; the first matching rule wins.",
+  "config.rules.pattern.description": "Workspace-relative glob pattern, e.g. legacy/**",
+  "config.autoReopen.description": "Automatically reopen clean files in regular editors when a rule matches or a unique encoding is detected from bytes. Ambiguous files are never auto-reopened and are indicated in the status bar.",
+  "config.autoReopenGitComparison.description": "Automatically reopen Git comparisons (working tree, staged, commit history, renames) and single Git views using encoding rules, open working files, or unique byte detection. Changes display only and never modifies files.",
+  "config.warnOnOpen.description": "Show a warning notification when auto-reopen is disabled or a file cannot be decoded without loss in its current encoding.",
+  "config.warnOnSave.description": "Warn on save when encoding mismatches, decode loss, or replacement characters (U+FFFD) are detected. Does not block saving.",
+  "config.showExplorerBadges.description": "Show encoding badges (such as SJ, U8) in the Explorer for configured folders and files matching encoding rules.",
+  "config.conversionExclude.description": "Glob pattern excluded from batch folder conversion.",
+  "config.maxFileSizeKB.description": "Maximum file size (KiB, up to 32 MiB) for automatic encoding detection and conversion.",
+  "config.maxScanFiles.description": "Maximum number of files scanned during a single batch folder conversion."
+}

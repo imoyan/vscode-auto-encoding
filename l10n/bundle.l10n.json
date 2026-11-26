@@ -272,5 +272,15 @@
   "Registered files under {0} as {1}.": "Registered files under {0} as {1}.",
   "Expected encoding: {0}\nRule source: {1} / {2}": "Expected encoding: {0}\nRule source: {1} / {2}",
   "Folder rule: {0}\nTarget: {1} / {2}\nEach file uses the highest-priority matching rule.": "Folder rule: {0}\nTarget: {1} / {2}\nEach file uses the highest-priority matching rule.",
-  "Auto Encoding settings or path exceeded the evaluation limit. Reduce the number, length, or glob complexity of your rules.": "Auto Encoding settings or path exceeded the evaluation limit. Reduce the number, length, or glob complexity of your rules."
+  "Auto Encoding settings or path exceeded the evaluation limit. Reduce the number, length, or glob complexity of your rules.": "Auto Encoding settings or path exceeded the evaluation limit. Reduce the number, length, or glob complexity of your rules.",
+  "Original (Virtual)": "Original (Virtual)",
+  "Modified (Virtual)": "Modified (Virtual)",
+  "Left side (Original, Virtual)": "Left side (Original, Virtual)",
+  "Right side (Modified, Virtual)": "Right side (Modified, Virtual)",
+  "Working / Git side only · keep diff view": "Working / Git side only · keep diff view",
+  "$(go-to-file) Open Working File in Standard Editor": "$(go-to-file) Open Working File in Standard Editor",
+  "Open as a standalone editor when multi-file diff or virtual snapshot is hard to read": "Open as a standalone editor when multi-file diff or virtual snapshot is hard to read",
+  "Virtual snapshot sides cannot change encoding due to VS Code limitations; only the working/Git side is aligned. Click to open the working file in a standard editor.": "Virtual snapshot sides cannot change encoding due to VS Code limitations; only the working/Git side is aligned. Click to open the working file in a standard editor.",
+  "Shows the encodings currently used to read the active file in the multi-file diff.": "Shows the encodings currently used to read the active file in the multi-file diff.",
+  "Click to reopen, register an encoding rule, or open the working file in a standard editor. Reopening changes display only and never modifies files.": "Click to reopen, register an encoding rule, or open the working file in a standard editor. Reopening changes display only and never modifies files."
 }

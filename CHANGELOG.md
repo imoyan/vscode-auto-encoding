@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-26
+
+### Added
+- Support for multi-file diff tabs (`TabInputTextMultiDiff`, such as the VS Code Agents Window Changes view), aligning loaded local/Git sides with focus priority without breaking the unified multi-diff layout.
+- Safe handling of virtual snapshot schemes (e.g. `chat-editing-snapshot-text-model:`) with a one-click **Open Working File in Standard Editor** action in the status bar QuickPick.
+- Support for outside-workspace local files (e.g. agent worktrees) for automatic encoding detection, auto-reopening, status bar inspection, and save warnings (workspace diagnostics remain scoped to workspace folders).
+
+### Changed
+- Redesigned extension icon (`media/icon.png`) with a full-bleed transparent rounded-square CJK encoding motif (`◆?` ⇄ `あ・한・漢`) for clear visibility at 42px in the Extensions view.
+- Folder batch conversion now includes files inheriting the selected folder's own rule when converting to a different target encoding, while still protecting files with conflicting child rules.
+
 ## [0.1.0] - 2026-11-26
 
 ### Added

@@ -166,6 +166,15 @@ async function harness(t: TestContext, options: { rule?: string; autoReopenGitCo
       tab = { input: new TabInputTextDiff(original, modified), label: "a.dat (Working Tree)", isPreview: options.preview ?? false };
       vsc.window.activeTextEditor = { document: documents.find((entry) => entry.uri.toString() === modified.toString())! };
     },
+    showMultiDiff: (pairs: Array<[Uri, Uri]>, activeUri?: Uri) => {
+      tab = {
+        input: { textDiffs: pairs.map(([original, modified]) => new TabInputTextDiff(original, modified)) },
+        label: "Changes",
+        isPreview: options.preview ?? false,
+      };
+      const targetUri = activeUri ?? pairs[0]![1];
+      vsc.window.activeTextEditor = { document: documents.find((entry) => entry.uri.toString() === targetUri.toString())! };
+    },
     showSingle: (uri: Uri) => {
       tab = { input: new TabInputText(uri), label: path.basename(uri.path), isPreview: options.preview ?? false };
       vsc.window.activeTextEditor = { document: documents.find((entry) => entry.uri.toString() === uri.toString())! };
@@ -557,4 +566,60 @@ test("rename comparisons inherit open working file encoding or rule fallback acr
   assert.equal(await byRule.align(), true);
   assert.equal(byRule.documents.find((d) => d.uri === oldRuleGit)?.encoding, "eucjp");
   assert.equal(byRule.documents.find((d) => d.uri === newRuleGit)?.encoding, "eucjp");
+});
+
+test("multi-diff tabs align loaded reopenable sides without calling vscode.diff and skip virtual/unloaded entries", async (t) => {
+  const h = await harness(t);
+  const secondPath = path.join(h.root, "second.txt");
+  const secondFile = Uri.file(secondPath);
+  const unloadedPath = path.join(h.root, "unloaded.txt");
+  const unloadedFile = Uri.file(unloadedPath);
+  const unloadedGit = new Uri("git", unloadedPath, "ref=HEAD");
+  const virtualOriginal = new Uri("chat-editing-snapshot-text-model", secondPath, "session=1");
+  await writeFile(h.filePath, SJIS_JA);
+  await writeFile(secondPath, SJIS_JA);
+  await writeFile(unloadedPath, SJIS_JA);
+  h.gitBlobs.set(h.headUri.toString(), SJIS_JA);
+  h.gitBlobs.set(unloadedGit.toString(), SJIS_JA);
+
+  h.doc(h.headUri, "utf8");
+  h.doc(h.fileUri, "utf8");
+  const virtualDoc = h.doc(virtualOriginal, "utf8");
+  const secondDoc = h.doc(secondFile, "utf8");
+
+  h.showMultiDiff([[h.headUri, h.fileUri], [virtualOriginal, secondFile], [unloadedGit, unloadedFile]], secondFile);
+  assert.equal(await h.align(), true);
+
+  assert.equal(h.documents.find((d) => d.uri === h.headUri)?.encoding, "shiftjis");
+  assert.equal(h.documents.find((d) => d.uri === h.fileUri)?.encoding, "shiftjis");
+  assert.equal(secondDoc.encoding, "shiftjis");
+  assert.equal(virtualDoc.encoding, "utf8");
+  assert.equal(h.opened.some((entry) => entry.uri.toString() === unloadedFile.toString() || entry.uri.toString() === unloadedGit.toString()), false);
+  assert.equal(h.commands.length, 0);
+  assert.equal(h.opened.some((entry) => entry.uri.scheme === "chat-editing-snapshot-text-model"), false);
+
+  h.updateStatus(secondDoc);
+  assert.match(String(h.status.text), /Left \(Original \(Virtual\)\): UTF-8 \/ Right \(Working\): Shift JIS \/ CP932/);
+  assert.match(String(h.status.tooltip), /Virtual snapshot sides cannot change encoding/);
+
+  h.vsc.window.activeTextEditor = undefined as unknown as { document: Doc };
+  h.picks.push((items: Record<string, unknown>[]) => {
+    const choose = items.find((item) => item.action === "choose");
+    assert.equal(choose?.description, "Both sides · keep diff view");
+    return undefined;
+  });
+  await h.inspect();
+
+  h.vsc.window.activeTextEditor = { document: secondDoc };
+  h.picks.push((items: Record<string, unknown>[]) => {
+    assert.equal(items.some((item) => item.action === "original"), false);
+    assert.equal(items.some((item) => item.action === "modified"), true);
+    const choose = items.find((item) => item.action === "choose");
+    assert.equal(choose?.description, "Working / Git side only · keep diff view");
+    const openWorking = items.find((item) => item.action === "openWorkingFile");
+    assert.ok(openWorking, "openWorkingFile action should be offered");
+    return openWorking;
+  });
+  await h.inspect();
+  assert.equal(h.shownDocs.at(-1)?.doc.uri.toString(), secondFile.toString());
 });

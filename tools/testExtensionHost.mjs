@@ -5,7 +5,8 @@ import * as path from "node:path";
 import process from "node:process";
 import { Buffer } from "node:buffer";
 import console from "node:console";
-import { spawnSync, spawn } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { runExtensionHost } from "./testExtensionHostProcess.mjs";
 import { fileURLToPath, URL } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -144,8 +145,13 @@ try {
   env.FEG_HOST_RESULT = path.join(temporary, "passed.txt");
   env.VSCODE_CLI = "1";
   delete env.ELECTRON_RUN_AS_NODE;
-  const result = await new Promise((resolve, reject) => {
-    const child = spawn(
+  const controller = new globalThis.AbortController();
+  const interrupt = () => controller.abort();
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", interrupt);
+  const timeoutMs = 180_000;
+  try {
+    const result = await runExtensionHost(
       executable,
       [
         workspace,
@@ -167,13 +173,16 @@ try {
         "--extensionTestsPath",
         path.join(extension, "suite.cjs"),
       ],
-      { env, stdio: "inherit", timeout: 180000 },
+      { env, signal: controller.signal, timeoutMs },
     );
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({ code, signal }));
-  });
-  if (result.code !== 0) throw new Error(`Extension Host failed: ${JSON.stringify(result)}`);
-  if ((await fs.readFile(env.FEG_HOST_RESULT, "utf8")) !== "passed") {
+    if (result.reason !== "exit" || result.code !== 0 || !result.reaped) {
+      throw new Error(`Extension Host failed: ${JSON.stringify({ ...result, timeoutMs })}`);
+    }
+  } finally {
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", interrupt);
+  }
+  if ((await fs.readFile(env.FEG_HOST_RESULT, "utf8").catch(() => undefined)) !== "passed") {
     throw new Error("テスト完了を確認できません。");
   }
   console.log("Extension Hostの操作フローテストが成功しました。");

@@ -22,13 +22,14 @@ import { classifyLineEndings, classifyTextLineEndings } from "../src/scanCore.js
 
 type Runtime = typeof import("../src/extension.js") &
   typeof import("../src/editorEncoding.js") &
-  typeof import("../src/conversionSelection.js");
+  typeof import("../src/conversionSelection.js") &
+  typeof import("../src/conversion.js");
 type Listener = (value: unknown) => unknown;
 
 const bundle = build({
   stdin: {
     contents:
-      'export { activate } from "./src/extension.ts"; export { inspectActiveFile } from "./src/editorEncoding.ts"; export { selectConversion } from "./src/conversionSelection.ts";',
+      'export { activate } from "./src/extension.ts"; export { inspectActiveFile } from "./src/editorEncoding.ts"; export { selectConversion } from "./src/conversionSelection.ts"; export { ConversionManager } from "./src/conversion.ts";',
     resolveDir: process.cwd(),
   },
   bundle: true,
@@ -342,10 +343,12 @@ async function harness(t: TestContext, input: Record<string, string | Uint8Array
     },
   };
   const globalMemento = {
+    keys: () => [...globalStateMap.keys()],
     get: (key: string) => globalStateMap.get(key),
     update: async (key: string, value: unknown) => {
       beforeStateUpdate?.(key, value);
-      globalStateMap.set(key, value);
+      if (value === undefined) globalStateMap.delete(key);
+      else globalStateMap.set(key, value);
     },
     setKeysForSync: (keys: readonly string[]) => {
       syncedKeys = keys;
@@ -1400,21 +1403,69 @@ test(
     assert.deepEqual(new Uint8Array(await readFile(extSjisPath)), sjisBytes);
     assert.equal(h.state.get(LAST), undefined);
 
-    // 3. Empty window (no workspaceFolders) converts ISO-2022-JP outside-workspace file and undoes via globalState.
+    // 3. Empty window (no workspaceFolders) converts ISO-2022-JP outside-workspace file and undoes via window-scoped globalState.
     h.workspace.workspaceFolders = [];
     h.foldersChanged();
     h.picks.push((items: Record<string, unknown>[]) =>
       items.find((item) => item.targetEncoding === "utf8" && !item.targetLineEnding),
     );
     assert.equal(await h.command("convertFile", extJisUri), true);
-    assert.equal(typeof h.globalState.get(LAST), "string");
+    const windowId = h.state.get("autoEncoding.emptyWindowId") as string;
+    assert.equal(typeof windowId, "string");
+    assert.equal(typeof h.globalState.get(`${LAST}:${windowId}`), "string");
     assert.deepEqual(
       new Uint8Array(await readFile(extJisPath)),
       new TextEncoder().encode("日本語\n"),
     );
+
+    // Simulate a second concurrent empty window sharing globalState + globalStorageUri: it must NOT delete Window 1's backup!
+    const otherEmptyWindowState = new Map<string, unknown>();
+    const otherContext = {
+      workspaceState: {
+        get: (key: string) => otherEmptyWindowState.get(key),
+        update: async (key: string, value: unknown) => {
+          if (value === undefined) otherEmptyWindowState.delete(key);
+          else otherEmptyWindowState.set(key, value);
+        },
+      },
+      globalState: {
+        keys: () => [...h.globalState.keys()],
+        get: (key: string) => h.globalState.get(key),
+        update: async (key: string, value: unknown) => {
+          if (value === undefined) h.globalState.delete(key);
+          else h.globalState.set(key, value);
+        },
+        setKeysForSync: () => undefined,
+      },
+      subscriptions: [] as Array<{ dispose(): void }>,
+      extensionPath: process.cwd(),
+      globalStorageUri: Uri.file(path.join(h.uri("storage").fsPath)),
+    } as unknown as import("vscode").ExtensionContext;
+    await writeFile(extSjisPath, sjisBytes);
+    const secondManager = new h.runtime.ConversionManager(
+      otherContext,
+      () => undefined,
+      () => h.workspace.getConfiguration() as unknown as import("vscode").WorkspaceConfiguration,
+    );
+    assert.equal(await secondManager.convertFile(extSjisUri as unknown as import("vscode").Uri, "utf8"), true);
+    const secondWindowId = otherEmptyWindowState.get("autoEncoding.emptyWindowId") as string;
+    assert.notEqual(secondWindowId, windowId);
+    assert.equal(typeof h.globalState.get(`${LAST}:${windowId}`), "string");
+    assert.equal(typeof h.globalState.get(`${LAST}:${secondWindowId}`), "string");
+
+    // Window 1 undoes its own file without touching Window 2's file, and Window 2 undoes its own file cleanly
     h.confirmations.push("Undo");
     assert.equal(await h.command("undoLastConversion"), true);
     assert.deepEqual(new Uint8Array(await readFile(extJisPath)), jisBytes);
-    assert.equal(h.globalState.get(LAST), undefined);
+    assert.deepEqual(
+      new Uint8Array(await readFile(extSjisPath)),
+      new TextEncoder().encode("日本語\n"),
+    );
+    assert.equal(h.globalState.get(`${LAST}:${windowId}`), undefined);
+
+    h.confirmations.push("Undo");
+    assert.equal(await secondManager.undoLastConversion(), true);
+    assert.deepEqual(new Uint8Array(await readFile(extSjisPath)), sjisBytes);
+    assert.equal(h.globalState.get(`${LAST}:${secondWindowId}`), undefined);
   },
 );

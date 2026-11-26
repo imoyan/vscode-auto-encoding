@@ -14,6 +14,7 @@ import {
   type BackupRecord,
   activeConversionState,
   isConversionBackupSession,
+  pruneEmptyWindowBackups,
   writeJsonAtomic,
   deleteIfPresent,
   deleteStoredBackupSession,
@@ -561,6 +562,7 @@ export class ConversionManager {
         if (previousSession !== protectedPreviousSession) {
           await deleteStoredBackupSession(this.context.globalStorageUri, previousSession);
         }
+        await pruneEmptyWindowBackups(this.context);
       } else if (disposition === "restorePreviousAndDeleteNew") {
         pointerRollbackFailed = !(await this.rollbackPointers({
           state,

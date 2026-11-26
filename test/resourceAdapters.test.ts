@@ -126,6 +126,7 @@ test("malformed backup JSON is ignored as an invalid record", async () => {
   let bytes = Buffer.from('{"version":');
   const backup = loadModule<{ readBackupRecord(uri: unknown): Promise<unknown> }>("conversionBackup.ts", {
     "node:crypto": {},
+    "node:path": path,
     vscode: {},
     "./conversionCore.js": {},
     "./localPathSafety.js": {},
@@ -347,6 +348,7 @@ test("file-backed UNC storage reaches filesystem containment checks", async () =
     "conversionBackup.ts",
     {
       "node:crypto": {},
+      "node:path": path,
       vscode: { env: {} },
       "./conversionCore.js": {},
       "./stableResourceRead.js": {},
@@ -373,12 +375,19 @@ test("file-backed UNC storage reaches filesystem containment checks", async () =
   assert.equal(checks, 1);
 });
 
-test("activeConversionState uses workspaceState when folders are open and globalState in empty windows", () => {
+test("activeConversionState uses workspaceState when folders are open and isolates empty windows in globalState", async () => {
   let workspaceFolders: unknown[] | undefined = [{ name: "ws" }];
+  let counter = 0;
   const backup = loadModule<{
-    activeConversionState(context: unknown): unknown;
+    activeConversionState(context: unknown): {
+      get(key: string): unknown;
+      update(key: string, value: unknown): Promise<void>;
+    };
   }>("conversionBackup.ts", {
-    "node:crypto": {},
+    "node:crypto": {
+      randomUUID: () => `00000000-0000-4000-8000-${String(++counter).padStart(12, "0")}`,
+    },
+    "node:path": path,
     vscode: {
       workspace: {
         get workspaceFolders() {
@@ -390,13 +399,42 @@ test("activeConversionState uses workspaceState when folders are open and global
     "./stableResourceRead.js": {},
     "./localPathSafety.js": {},
   });
-  const wsState = { kind: "workspace" };
-  const globalState = { kind: "global" };
-  assert.equal(backup.activeConversionState({ workspaceState: wsState, globalState }), wsState);
+  const makeMemento = () => {
+    const map = new Map<string, unknown>();
+    return {
+      map,
+      keys: () => [...map.keys()],
+      get: (key: string) => map.get(key),
+      update: async (key: string, value: unknown) => {
+        if (value === undefined) map.delete(key);
+        else map.set(key, value);
+      },
+    };
+  };
+  const wsStateA = makeMemento();
+  const wsStateB = makeMemento();
+  const sharedGlobalState = makeMemento();
+  const ctxA = { workspaceState: wsStateA, globalState: sharedGlobalState };
+  const ctxB = { workspaceState: wsStateB, globalState: sharedGlobalState };
+
+  assert.equal(backup.activeConversionState(ctxA), wsStateA);
+
   workspaceFolders = [];
-  assert.equal(backup.activeConversionState({ workspaceState: wsState, globalState }), globalState);
-  workspaceFolders = undefined;
-  assert.equal(backup.activeConversionState({ workspaceState: wsState, globalState }), globalState);
+  const scopedA = backup.activeConversionState(ctxA);
+  const scopedB = backup.activeConversionState(ctxB);
+  // Same window returns stable Memento reference; two empty windows never clobber each other's keys
+  assert.equal(backup.activeConversionState(ctxA), scopedA);
+  await scopedA.update("autoEncoding.lastConversionBackup", "session-A");
+  await scopedB.update("autoEncoding.lastConversionBackup", "session-B");
+  assert.equal(scopedA.get("autoEncoding.lastConversionBackup"), "session-A");
+  assert.equal(scopedB.get("autoEncoding.lastConversionBackup"), "session-B");
+
+  // Reloading window A (new context object sharing wsStateA) preserves its emptyWindowId and Undo pointer
+  const reloadedCtxA = { workspaceState: wsStateA, globalState: sharedGlobalState };
+  assert.equal(
+    backup.activeConversionState(reloadedCtxA).get("autoEncoding.lastConversionBackup"),
+    "session-A",
+  );
 });
 
 test("reopening a comparison side preserves both URIs and labels their encodings", async () => {

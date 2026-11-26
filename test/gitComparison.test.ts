@@ -623,3 +623,17 @@ test("multi-diff tabs align loaded reopenable sides without calling vscode.diff 
   await h.inspect();
   assert.equal(h.shownDocs.at(-1)?.doc.uri.toString(), secondFile.toString());
 });
+
+test("embedded git diff views outside tabGroups align git and working file sides via hintUri without calling vscode.diff", async (t) => {
+  const h = await harness(t);
+  await writeFile(h.filePath, SJIS_JA);
+  h.gitBlobs.set(h.headUri.toString(), SJIS_JA);
+  const gitDoc = h.doc(h.headUri, "utf8");
+  const workingDoc = h.doc(h.fileUri, "utf8");
+
+  // No diff tab in tabGroups (e.g. Agents Window inline Changes pane while chat tab is active)
+  assert.equal(await (h.runtime.alignActiveComparison as (hint?: unknown) => Promise<boolean>)(h.headUri), true);
+  assert.equal(gitDoc.encoding, "shiftjis");
+  assert.equal(workingDoc.encoding, "shiftjis");
+  assert.equal(h.commands.length, 0);
+});

@@ -2,7 +2,7 @@
   "name": "auto-encoding",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "imoyan",
   "license": "MIT",
   "author": {
@@ -42,6 +42,9 @@
     "vscode": "^1.100.0"
   },
   "capabilities": {
+    "agentsWindow": {
+      "supported": true
+    },
     "virtualWorkspaces": {
       "supported": false,
       "description": "%capabilities.virtualWorkspaces.description%"

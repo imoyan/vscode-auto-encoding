@@ -4,7 +4,12 @@ import { t } from "./l10n.js";
 import { configuredFileSizeLimit } from "./fileLimits.js";
 import { SerialTaskQueue } from "./coalescingTask.js";
 import { ConversionManager } from "./conversion.js";
-import { encodingInfo, isSupportedEncoding } from "./rules.js";
+import {
+  ISO2022JP_ENCODING,
+  encodingInfo,
+  isReopenableEncoding,
+  isSupportedEncoding,
+} from "./rules.js";
 import {
   CONFIGURATION_SECTION,
   clearWorkspaceRuleCache,
@@ -475,6 +480,7 @@ export function activate(context: vscode.ExtensionContext): void {
         !latestMatchAfterInspect &&
         inspection.status === "detectedMismatch" &&
         inspection.detectedEncoding &&
+        isReopenableEncoding(inspection.detectedEncoding) &&
         config.get("autoReopen", true) &&
         !currentDoc.isDirty &&
         !hasAutoReopenFailed(currentDoc.uri, inspection.detectedEncoding)
@@ -545,6 +551,22 @@ export function activate(context: vscode.ExtensionContext): void {
     if (afterInspection.status === "detectedMismatch" && afterInspection.detectedEncoding) {
       const detectedEncoding = afterInspection.detectedEncoding;
       const detectedLabel = encodingInfo(detectedEncoding).label;
+      if (detectedEncoding.toLowerCase() === ISO2022JP_ENCODING) {
+        const convertAction = t("Convert to UTF-8, etc. and Save");
+        const message = t(
+          "{0} is {1}. VS Code does not open this encoding natively; you can convert and save it as UTF-8, Shift JIS, etc.",
+          filename,
+          detectedLabel,
+        );
+        const notice = vscode.window.showWarningMessage(message, convertAction);
+        return async () => {
+          if ((await notice) === convertAction) {
+            const targetDoc = findOpenDocument(document.uri) ?? currentDoc;
+            if (targetDoc.isClosed) return;
+            await vscode.commands.executeCommand("autoEncoding.convertFile", targetDoc.uri);
+          }
+        };
+      }
       const action = t("Reopen as {0}", detectedLabel);
       const message = afterMatch
         ? ruleMismatchedOnNotice

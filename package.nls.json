@@ -13,6 +13,7 @@
   "config.rules.pattern.description": "Workspace-relative glob pattern, e.g. legacy/**",
   "config.autoReopen.description": "Automatically reopen clean files in regular editors when a rule matches or a unique encoding is detected from bytes. Ambiguous files are never auto-reopened and are indicated in the status bar.",
   "config.autoReopenGitComparison.description": "Automatically reopen Git comparisons (working tree, staged, commit history, renames) and single Git views using encoding rules, open working files, or unique byte detection. Changes display only and never modifies files.",
+  "config.autoDetectEncodings.description": "Priority candidate encodings checked during automatic detection besides UTF-8, BOM, and ISO-2022-JP. Defaults to `shiftjis` and `eucjp`; add `gb18030`, `big5hkscs`, `euckr`, `windows1252`, or `iso88591`, or set `[]` to disable legacy multibyte auto-detection.",
   "config.warnOnOpen.description": "Show a warning notification when auto-reopen is disabled or a file cannot be decoded without loss in its current encoding.",
   "config.warnOnSave.description": "Warn on save when encoding mismatches, decode loss, or replacement characters (U+FFFD) are detected. Does not block saving.",
   "config.showExplorerBadges.description": "Show encoding badges (such as SJ, U8) in the Explorer for configured folders and files matching encoding rules.",

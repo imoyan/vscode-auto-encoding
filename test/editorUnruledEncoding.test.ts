@@ -86,6 +86,11 @@ const SJIS_JA = Uint8Array.from([0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea, 0x0a]);
 const EUC_JA = Uint8Array.from([0xc6, 0xfc, 0xcb, 0xdc, 0xb8, 0xec, 0x0a]);
 const AMBIGUOUS_KANA = Uint8Array.from([0xa4, 0xa2, 0xa4, 0xa4, 0x0a]);
 const WIN1252_CAFE = Uint8Array.from([0x63, 0x61, 0x66, 0xe9, 0x0a]);
+const UNIDENTIFIABLE_LOSS = Uint8Array.from([0x63, 0x61, 0x66, 0x81, 0x0a]);
+const GB18030_ONLY = Uint8Array.from([0x81, 0x30, 0x89, 0x38, 0x0a]);
+const ISO2022JP_JA = Uint8Array.from([
+  0x1b, 0x24, 0x42, 0x46, 0x7c, 0x4b, 0x5c, 0x38, 0x6c, 0x1b, 0x28, 0x42, 0x0a,
+]); // "日本語\n" in ISO-2022-JP
 const WIN1252_AA = Uint8Array.from([0xe0, 0x61, 0x0a]);
 const WIN1252_AE = Uint8Array.from([0xe0, 0xe8, 0x0a]);
 // UTF-16 LE "AB\n" without BOM -> contains null bytes or let's use UTF-8 opened as windows1252, or ISO-8859-1 / UTF-8
@@ -100,6 +105,7 @@ function testDecode(bytes: Uint8Array, encoding: string): string {
   }
   if (encoding === "shiftjis") return new TextDecoder("shift_jis", { fatal: true }).decode(bytes);
   if (encoding === "eucjp") return new TextDecoder("euc-jp", { fatal: true }).decode(bytes);
+  if (encoding === "gb18030") return new TextDecoder("gb18030", { fatal: true }).decode(bytes);
   if (encoding === "windows1252" || encoding === "iso88591") {
     return new TextDecoder("windows-1252", { fatal: true }).decode(bytes);
   }
@@ -146,6 +152,10 @@ function testEncode(text: string, encoding: string): Uint8Array {
     }
     if (text === "琥\n") return WIN1252_AE;
     throw new Error("unrepresentable in eucjp fixture");
+  }
+  if (encoding === "gb18030") {
+    if (text === new TextDecoder("gb18030", { fatal: true }).decode(GB18030_ONLY)) return GB18030_ONLY;
+    throw new Error("unrepresentable in gb18030 fixture");
   }
   throw new Error(`unsupported test encoding: ${encoding}`);
 }
@@ -584,24 +594,24 @@ test("default autoReopen=true reopens unambiguous unconfigured files silently wi
   assert.deepEqual(h.diagnosticsFor("ambiguous.txt"), []);
 });
 
-test("unidentifiable decode loss (Windows-1252 opened as UTF-8) warns and clears after reopening as Windows-1252", async (t) => {
-  const h = await harness(t, { "european.txt": WIN1252_CAFE });
+test("unidentifiable decode loss (opt-in GB18030 opened as UTF-8) warns and clears after reopening as GB18030", async (t) => {
+  const h = await harness(t, { "gb18030.txt": GB18030_ONLY });
   h.warningResponses.push("Inspect and Reopen");
   h.picks.push(
     (items: Record<string, unknown>[]) => items.find((item) => item.action === "choose"),
-    (items: Record<string, unknown>[]) => items.find((item) => item.encoding === "windows1252"),
+    (items: Record<string, unknown>[]) => items.find((item) => item.encoding === "gb18030"),
   );
-  const doc = await h.openVisible("european.txt", "utf8", (d) => d.encoding === "windows1252" && h.status.backgroundColor === undefined && h.diagnosticsFor("european.txt").length === 0);
+  const doc = await h.openVisible("gb18030.txt", "utf8", (d) => d.encoding === "gb18030" && h.status.backgroundColor === undefined && h.diagnosticsFor("gb18030.txt").length === 0);
 
   assert.equal(h.warnings.length, 1);
   assert.deepEqual(h.warnings[0]!.buttons, ["Inspect and Reopen"]);
   assert.match(h.shownPicks[0]!.title!, /Could not decode without loss/);
-  assert.equal(doc.encoding, "windows1252");
+  assert.equal(doc.encoding, "gb18030");
   assert.equal(h.status.backgroundColor, undefined);
-  assert.deepEqual(h.diagnosticsFor("european.txt"), []);
+  assert.deepEqual(h.diagnosticsFor("gb18030.txt"), []);
 
   // Without reopening, status bar and diagnostic retain decode-loss warning
-  const h2 = await harness(t, { "european2.txt": WIN1252_CAFE });
+  const h2 = await harness(t, { "european2.txt": UNIDENTIFIABLE_LOSS });
   h2.warningResponses.push(undefined);
   await h2.openVisible("european2.txt", "utf8", () => h2.warnings.length === 1);
   assert.equal(h2.status.text, "$(warning) Open: UTF-8 (decode loss · no rule)");
@@ -682,7 +692,7 @@ test("warnOnSave protects against encoding-mismatched saves and newly introduced
   const h = await harness(t, {
     "has-fffd.md": UTF8_WITH_REPLACEMENT,
     "clean.md": UTF8_CLEAN,
-    "loss.txt": WIN1252_CAFE,
+    "loss.txt": UNIDENTIFIABLE_LOSS,
   });
 
   // 1. Pre-existing valid UTF-8 with 1 U+FFFD: editing unrelated lines does NOT warn
@@ -1069,7 +1079,7 @@ test("unresolved candidateMismatch (unruled and ruled) stays quiet without toast
   const h = await harness(t, {
     "unruled-ambig.txt": AMBIGUOUS_KANA,
     "ruled-ambig.txt": AMBIGUOUS_KANA,
-    "ruled-loss.txt": WIN1252_CAFE,
+    "ruled-loss.txt": UNIDENTIFIABLE_LOSS,
   });
 
   await h.openVisible("unruled-ambig.txt", "utf8", () => h.status.text === "$(warning) Open: UTF-8 (candidates · no rule)");
@@ -1221,8 +1231,8 @@ test("three-way mismatch (rule, disk bytes, and current encoding all differ) gui
   await h1.waitFor(() => doc1.encoding === "eucjp" && h1.status.text === "$(warning) Open: EUC-JP / Rule: Shift JIS / CP932", "switched to EUC-JP");
   assert.equal(h1.currentInspection(doc1)?.status, "ok");
 
-  // 2. decodeLoss: rule=shiftjis, disk=WIN1252_CAFE, doc=utf8 (no expected action button in QuickPick)
-  const h2 = await harness(t, { "loss-three-way.dat": WIN1252_CAFE });
+  // 2. decodeLoss: rule=shiftjis, disk=UNIDENTIFIABLE_LOSS, doc=utf8 (no expected action button in QuickPick)
+  const h2 = await harness(t, { "loss-three-way.dat": UNIDENTIFIABLE_LOSS });
   h2.config.set("rules", [{ pattern: "*.dat", encoding: "shiftjis" }]);
   h2.warningResponses.push(undefined);
 
@@ -1237,6 +1247,34 @@ test("three-way mismatch (rule, disk bytes, and current encoding all differ) gui
     return undefined;
   });
   await h2.command("inspectActiveFile");
+});
+
+test("ISO-2022-JP file skips autoReopen, notifies with conversion action, and surfaces convert-first QuickPick", async (t) => {
+  const h = await harness(t, { "jis.txt": ISO2022JP_JA });
+  h.warningResponses.push(undefined);
+
+  const doc = await h.openVisible("jis.txt", "utf8", () => h.warnings.length === 1);
+  assert.equal(doc.encoding, "utf8");
+  assert.equal(h.reopenedCalls.length, 0);
+  assert.deepEqual(h.warnings[0]!.buttons, ["Convert to UTF-8, etc. and Save"]);
+  assert.match(h.warnings[0]!.message, /ISO-2022-JP \(JIS\)/);
+  assert.equal(h.status.text, "$(warning) Open: UTF-8 / Detected: ISO-2022-JP (JIS) (convertible)");
+
+  h.picks.push((items: Record<string, unknown>[]) => {
+    assert.equal(items[0]?.action, "convertFile");
+    assert.match(String(items[0]?.label), /Convert and Save from ISO-2022-JP \(JIS\) to UTF-8/);
+    assert.equal(items[0]?.detail, "L1: 日本語");
+    assert.equal(items.some((item) => item.action === "expected"), false);
+    return undefined;
+  });
+  await h.command("inspectActiveFile");
+});
+
+test("Windows-1252/ISO-8859-1 ambiguous café bytes surface candidateMismatch without toast", async (t) => {
+  const h = await harness(t, { "cafe.txt": WIN1252_CAFE });
+  const doc = await h.openVisible("cafe.txt", "utf8", () => h.status.text === "$(warning) Open: UTF-8 (candidates · no rule)");
+  assert.equal(h.warnings.length, 0);
+  assert.deepEqual([...(h.currentInspection(doc)?.candidates ?? [])], ["windows1252", "iso88591"]);
 });
 
 test("manual reopen to a round-trippable single-byte encoding clears warnings even if bytes overlap Shift JIS or EUC-JP", async (t) => {

@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  DEFAULT_AUTO_DETECT_ENCODINGS,
+  encodingInfo,
   findFileRegistration,
   findFolderRegistration,
   findMatchingRule,
+  isReopenableEncoding,
+  isSupportedEncoding,
   normalizeRelativePath,
   patternForFolder,
   patternForFile,
+  sanitizeAutoDetectEncodings,
   sanitizeRules,
 } from "../src/rules.js";
 
@@ -66,4 +71,21 @@ test("single-file settings match only the literal selected filename and lookup e
   const folderRules = [{ pattern: patternForFolder("legacy/[src]"), encoding: "shiftjis" }];
   assert.equal(findFolderRegistration(folderRules, "legacy/[src]")?.encoding, "shiftjis");
   assert.equal(findFolderRegistration(folderRules, "legacy/other"), undefined);
+});
+
+test("supports East Asian rule encodings, keeps ISO-2022-JP source-only, and sanitizes autoDetectEncodings", () => {
+  for (const id of ["gb18030", "big5hkscs", "euckr"]) {
+    assert.equal(isSupportedEncoding(id), true);
+    assert.equal(isReopenableEncoding(id), true);
+  }
+  assert.equal(isSupportedEncoding("iso2022jp"), false);
+  assert.equal(isReopenableEncoding("iso2022jp"), false);
+  assert.equal(encodingInfo("iso2022jp").label, "ISO-2022-JP (JIS)");
+
+  assert.deepEqual(sanitizeAutoDetectEncodings(undefined), DEFAULT_AUTO_DETECT_ENCODINGS);
+  assert.deepEqual(sanitizeAutoDetectEncodings([]), []);
+  assert.deepEqual(
+    sanitizeAutoDetectEncodings(["SHIFTJIS", "gb18030", "shiftjis", "invalid", "euckr", 42]),
+    ["shiftjis", "gb18030", "euckr"],
+  );
 });

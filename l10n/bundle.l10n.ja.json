@@ -282,5 +282,21 @@
   "Open as a standalone editor when multi-file diff or virtual snapshot is hard to read": "複数ファイル差分や仮想スナップショットで見づらい場合の単体表示",
   "Virtual snapshot sides cannot change encoding due to VS Code limitations; only the working/Git side is aligned. Click to open the working file in a standard editor.": "仮想スナップショット側は VS Code の仕様上文字コードを変更できないため、作業ファイル／Git側のみ揃えています。見づらい場合はクリックして作業ファイルを通常エディターで開けます。",
   "Shows the encodings currently used to read the active file in the multi-file diff.": "複数ファイル差分（Multi-Diff）の現在ファイルで読み込んでいる文字コードです。",
-  "Click to reopen, register an encoding rule, or open the working file in a standard editor. Reopening changes display only and never modifies files.": "クリックすると、開き直し・設定の登録・作業ファイルの通常表示を選べます。開き直しは表示だけの変更で、ファイルは書き換えません。"
+  "Click to reopen, register an encoding rule, or open the working file in a standard editor. Reopening changes display only and never modifies files.": "クリックすると、開き直し・設定の登録・作業ファイルの通常表示を選べます。開き直しは表示だけの変更で、ファイルは書き換えません。",
+  "Current: {0} / {1} (Preview: {2}) — Select target format": "現在: {0} / {1}（復号例: {2}） — 変換先を選んでください",
+  "Current: {0} (Preview: {1}) — Select target format": "現在: {0}（復号例: {1}） — 変換先を選んでください",
+  "auto · BOM, ISO-2022-JP, UTF-8, UTF-16, unambiguous legacy encodings": "auto · BOM・ISO-2022-JP・UTF-8・UTF-16・一意な従来文字コード",
+  "Convert to UTF-8, etc. and Save": "UTF-8 等へ変換して保存",
+  "{0} is {1}. VS Code does not open this encoding natively; you can convert and save it as UTF-8, Shift JIS, etc.": "{0} は {1} です。VS Code 標準では直接開けないため、UTF-8 や Shift JIS 等へ変換して保存できます。",
+  "$(replace) Convert and Save from ISO-2022-JP (JIS) to UTF-8, etc....": "$(replace) ISO-2022-JP (JIS) から UTF-8 等へ変換して保存…",
+  "Recommended because VS Code cannot open this encoding natively (with backup)": "VS Code 標準非対応のため変換保存を推奨（バックアップ付き）",
+  "ISO-2022-JP detected": "ISO-2022-JP あり",
+  "One side is ISO-2022-JP (JIS). Because VS Code cannot open it natively, click to convert and save the working file as UTF-8, etc.": "ISO-2022-JP (JIS) の側が含まれています。VS Code 標準では直接開けないため、作業ファイル側をクリックから UTF-8 等へ変換して保存できます。",
+  "Git: {0} / Detected: {1} (unsupported by VS Code)": "Git版: {0} / 判定: {1}（VS Code標準非対応）",
+  "Saved bytes in the Git view are {0}, which VS Code cannot open natively.": "Git版の実バイト列は {0} です。VS Code 標準では直接開けません。",
+  "Convert and save the working file as UTF-8, etc., or click to inspect settings.": "作業ファイル側を UTF-8 等へ変換して保存するか、クリックして設定を確認できます。",
+  "Open: {0} / Detected: {1} (convertible)": "読み込み: {0} / 判定: {1}（変換可）",
+  "Saved bytes are {0}, which VS Code cannot open natively.": "保存済みの内容は {0} です。VS Code 標準では直接開けません。",
+  "Click to convert and save as UTF-8, Shift JIS, etc. with a local backup.": "クリックすると、UTF-8 や Shift JIS 等へバックアップ付きで変換して保存できます。",
+  "Saved bytes are {0}, which VS Code cannot open natively. Click to convert and save as UTF-8, etc.": "保存済みの内容は {0} です。VS Code 標準では直接開けないため、クリックして UTF-8 等へ変換して保存できます。"
 }

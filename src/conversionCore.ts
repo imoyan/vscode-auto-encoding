@@ -1,3 +1,5 @@
+import { ISO2022JP_ENCODING } from "./rules.js";
+
 export interface PreparedEncodingConversion {
   readonly text: string;
   readonly converted: Uint8Array;
@@ -211,18 +213,28 @@ export async function assessEncodingConversion(
 ): Promise<ConversionAssessment> {
   const skipped = (reason: ConversionSkipReason): ConversionAssessment => ({ kind: "skipped", reason });
   if (isCancellationRequested()) return skipped("cancelled");
+  if (targetEncoding.toLowerCase() === ISO2022JP_ENCODING) {
+    return skipped("targetMismatch");
+  }
+  const isIso2022JpSource = sourceEncoding.toLowerCase() === ISO2022JP_ENCODING;
   let text: string;
   try {
     text = await codec.decode(original, sourceEncoding);
     if (isCancellationRequested()) return skipped("cancelled");
     if (looksLikeBinary(text)) return skipped("binary");
-    const sourceRoundTrip = await codec.encode(text, sourceEncoding);
-    if (isCancellationRequested()) return skipped("cancelled");
-    if (
-      !bytesEqual(sourceRoundTrip, original) &&
-      !(sourceEncoding === "shiftjis" && !text.includes("\uFFFD") && strictShiftJisMatches(original, text))
-    ) {
-      return skipped("sourceMismatch");
+    if (isIso2022JpSource) {
+      if (text.includes("\uFFFD") || !strictIso2022JpMatches(original, text)) {
+        return skipped("sourceMismatch");
+      }
+    } else {
+      const sourceRoundTrip = await codec.encode(text, sourceEncoding);
+      if (isCancellationRequested()) return skipped("cancelled");
+      if (
+        !bytesEqual(sourceRoundTrip, original) &&
+        !(sourceEncoding === "shiftjis" && !text.includes("\uFFFD") && strictShiftJisMatches(original, text))
+      ) {
+        return skipped("sourceMismatch");
+      }
     }
   } catch (error) {
     return { kind: "skipped", reason: "sourceMismatch", error };
@@ -259,6 +271,14 @@ export async function assessEncodingConversion(
 function strictShiftJisMatches(bytes: Uint8Array, expectedText: string): boolean {
   try {
     return new TextDecoder("shift_jis", { fatal: true }).decode(bytes) === expectedText;
+  } catch {
+    return false;
+  }
+}
+
+function strictIso2022JpMatches(bytes: Uint8Array, expectedText: string): boolean {
+  try {
+    return new TextDecoder("iso-2022-jp", { fatal: true }).decode(bytes) === expectedText;
   } catch {
     return false;
   }

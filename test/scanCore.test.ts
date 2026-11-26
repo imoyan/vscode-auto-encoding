@@ -376,3 +376,131 @@ test("skips ASCII control streams and withholds their line endings", async () =>
   assert.equal(result.kind, "skip");
   assert.equal(classifyConsistentLineEndings(bytes, result, "utf8"), undefined);
 });
+
+test("detects ISO-2022-JP escape sequences and ignores ANSI color escape sequences", async () => {
+  const jisBytes = Uint8Array.from([
+    0x1b, 0x24, 0x42, 0x46, 0x7c, 0x4b, 0x5c, 0x38, 0x6c, 0x1b, 0x28, 0x42, 0x0a,
+  ]); // "日本語\n"
+  assert.deepEqual(await classifyEncoding(jisBytes, "utf8", codec), {
+    kind: "mismatch",
+    detectedEncoding: "iso2022jp",
+  });
+  const ansiColor = new TextEncoder().encode("\x1b[31merror\x1b[0m\n");
+  assert.notEqual((await classifyEncoding(ansiColor, "utf8", codec)).detectedEncoding, "iso2022jp");
+});
+
+test("detects Windows-1252 uniquely via 0x80-0x9F and reports Windows-1252/ISO-8859-1 candidates for 0xA0-0xFF", async () => {
+  const westernCodec: EncodingCodec = {
+    async decode(bytes, encoding) {
+      if (encoding === "windows1252") return new TextDecoder("windows-1252", { fatal: true }).decode(bytes);
+      if (encoding === "iso88591") return String.fromCharCode(...bytes);
+      return codec.decode(bytes, encoding);
+    },
+    async encode(text, encoding) {
+      if (encoding === "windows1252") {
+        return Uint8Array.from(text, (ch) => (ch === "€" ? 0x80 : ch.charCodeAt(0)));
+      }
+      if (encoding === "iso88591") {
+        return Uint8Array.from(text, (ch) => ch.charCodeAt(0));
+      }
+      return codec.encode(text, encoding);
+    },
+  };
+  const euro = Uint8Array.from([0x50, 0x72, 0x69, 0x63, 0x65, 0x3a, 0x20, 0x80, 0x31, 0x30]); // "Price: €10"
+  assert.deepEqual(await classifyEncoding(euro, "utf8", westernCodec), {
+    kind: "mismatch",
+    detectedEncoding: "windows1252",
+  });
+  const cafe = Uint8Array.from([0x63, 0x61, 0x66, 0xe9, 0x0a]); // "café\n"
+  assert.deepEqual(await classifyEncoding(cafe, "utf8", westernCodec), {
+    kind: "ambiguous",
+    candidates: ["windows1252", "iso88591"],
+  });
+  const undefinedByte = Uint8Array.from([0x63, 0x61, 0x66, 0x81, 0x0a]);
+  assert.deepEqual(await classifyEncoding(undefinedByte, "utf8", westernCodec), {
+    kind: "ambiguous",
+    candidates: undefined,
+  });
+});
+
+test("detects Japanese BOM-less UTF-16LE and UTF-16BE with low or zero NULL bytes", async () => {
+  const utf16Codec: EncodingCodec = {
+    async decode(bytes, encoding) {
+      if (encoding === "utf16le") return new TextDecoder("utf-16le", { fatal: true }).decode(bytes);
+      if (encoding === "utf16be") return new TextDecoder("utf-16be", { fatal: true }).decode(bytes);
+      return codec.decode(bytes, encoding);
+    },
+    async encode(text, encoding) {
+      if (encoding === "utf16le" || encoding === "utf16be") {
+        const out = new Uint8Array(text.length * 2);
+        for (let i = 0; i < text.length; i += 1) {
+          const code = text.charCodeAt(i);
+          out[i * 2] = encoding === "utf16le" ? code & 0xff : (code >> 8) & 0xff;
+          out[i * 2 + 1] = encoding === "utf16le" ? (code >> 8) & 0xff : code & 0xff;
+        }
+        return out;
+      }
+      return codec.encode(text, encoding);
+    },
+  };
+  const sample = "日本語のテスト文章です";
+  const leBytes = await utf16Codec.encode(sample, "utf16le");
+  const beBytes = await utf16Codec.encode(sample, "utf16be");
+  assert.deepEqual(await classifyEncoding(leBytes, "utf8", utf16Codec), {
+    kind: "mismatch",
+    detectedEncoding: "utf16le",
+  });
+  assert.deepEqual(await classifyEncoding(beBytes, "utf8", utf16Codec), {
+    kind: "mismatch",
+    detectedEncoding: "utf16be",
+  });
+
+  // Large (>8 KiB) non-UTF-16 buffer should be rejected during 8 KiB pre-screening without probing UTF-16.
+  const probedUtf16: string[] = [];
+  const trackingCodec: EncodingCodec = {
+    async decode(bytes, encoding) {
+      if (encoding === "utf16le" || encoding === "utf16be") probedUtf16.push(encoding);
+      return utf16Codec.decode(bytes, encoding);
+    },
+    async encode(text, encoding) {
+      return utf16Codec.encode(text, encoding);
+    },
+  };
+  const largeNonUtf16 = new Uint8Array(10_000).fill(0x81);
+  assert.deepEqual(await classifyEncoding(largeNonUtf16, "utf8", trackingCodec), {
+    kind: "ambiguous",
+    candidates: undefined,
+  });
+  assert.deepEqual(probedUtf16, []);
+
+  // Large (>8 KiB) Japanese BOM-less UTF-16LE with a surrogate pair straddling byte 8192.
+  const largeSample = "あ".repeat(4095) + "𠮷" + "日本語テスト";
+  const largeLe = await utf16Codec.encode(largeSample, "utf16le");
+  assert.deepEqual(await classifyEncoding(largeLe, "utf8", utf16Codec), {
+    kind: "mismatch",
+    detectedEncoding: "utf16le",
+  });
+});
+
+test("supports opt-in East Asian autoDetectEncodings without affecting default Japanese detection", async () => {
+  const euckrBytes = Uint8Array.from([0xbe, 0xc8, 0xb3, 0xe7, 0xc7, 0xcf, 0xbc, 0xbc, 0xbf, 0xe4]); // "안녕하세요"
+  const eastAsiaCodec: EncodingCodec = {
+    async decode(bytes, encoding) {
+      if (encoding === "euckr") return new TextDecoder("euc-kr", { fatal: true }).decode(bytes);
+      return codec.decode(bytes, encoding);
+    },
+    async encode(text, encoding) {
+      if (encoding === "euckr" && text === "안녕하세요") return euckrBytes;
+      return codec.encode(text, encoding);
+    },
+  };
+  assert.deepEqual(
+    await classifyEncoding(euckrBytes, "utf8", eastAsiaCodec, {
+      alternativeEncodings: ["euckr"],
+    }),
+    {
+      kind: "mismatch",
+      detectedEncoding: "euckr",
+    },
+  );
+});

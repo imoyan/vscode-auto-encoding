@@ -13,6 +13,7 @@
   "config.rules.pattern.description": "ワークスペースフォルダーからの相対 glob。例: legacy/**",
   "config.autoReopen.description": "未編集のファイルを通常のエディターで開いたとき、ルール一致またはバイト列から一意に判定できた文字コードで自動的に開き直します（候補が複数ある曖昧な場合は自動変更せずステータスバーで案内します）。",
   "config.autoReopenGitComparison.description": "Git比較（作業中・ステージ済み・コミット履歴・ファイル移動）や単体のGitファイル表示を開いたとき、文字コード設定・開いている作業ファイル・バイト列からの一意な自動判定にもとづいて自動的に開き直します。表示だけを変更し、ファイルは書き換えません。",
+  "config.autoDetectEncodings.description": "UTF-8・BOM・ISO-2022-JP 以外の自動判定で優先的に検査する文字コード候補です。既定の `shiftjis`・`eucjp` を維持しつつ、必要に応じて `gb18030`・`big5hkscs`・`euckr`・`windows1252`・`iso88591` を追加、または `[]` で無効化できます。",
   "config.warnOnOpen.description": "自動開き直しをオフにしている場合や、現在の文字コードで読み込み欠損があるファイルを開いた場合に通知します。",
   "config.warnOnSave.description": "保存時に、文字コードの不一致・読み込み欠損、または編集中の内容に含まれる置換文字（U+FFFD）を通知します。通知は保存を停止しません。",
   "config.showExplorerBadges.description": "文字コードを設定したフォルダーとルール対象のファイルに、エクスプローラー上で文字コードのバッジ（SJ・U8など）を表示します。",

@@ -106,7 +106,7 @@ async function harness(t: TestContext, input: Record<string, string | Uint8Array
   const picks: unknown[] = [];
   const confirmations: string[] = [];
   const information: (string | Promise<string | undefined>)[] = [];
-  const shownPicks: { items: Record<string, unknown>[]; title?: string }[] = [];
+  const shownPicks: { items: Record<string, unknown>[]; title?: string; placeHolder?: string }[] = [];
   const searchPatterns: string[] = [];
   let decorationChanges = 0;
   const commands = new Map<string, (...args: unknown[]) => Promise<unknown>>();
@@ -233,8 +233,11 @@ async function harness(t: TestContext, input: Record<string, string | Uint8Array
       messages.push(message);
       return confirmations.shift();
     },
-    showQuickPick: async (items: Record<string, unknown>[], options: { title?: string }) => {
-      shownPicks.push({ items, title: options.title });
+    showQuickPick: async (
+      items: Record<string, unknown>[],
+      options: { title?: string; placeHolder?: string },
+    ) => {
+      shownPicks.push({ items, title: options.title, placeHolder: options.placeHolder });
       const pick = picks.shift();
       return typeof pick === "function" ? pick(items) : pick;
     },
@@ -559,24 +562,18 @@ test("cancelling backup replacement yields no conversion; protected backups reta
 });
 
 test("Western single-byte ambiguity prompts source encoding and is never preselected for conversion", async (t) => {
-  const h = await harness(t, { "western.txt": new Uint8Array([0x82]) });
+  const h = await harness(t, { "western.txt": new Uint8Array([0xe9]) });
   const decode = h.workspace.decode;
   const encode = h.workspace.encode;
   h.workspace.decode = async (bytes, options) => {
-    if (options.encoding === "iso88591") return String.fromCharCode(...bytes);
-    if (options.encoding === "windows1252") {
-      return Array.from(bytes, (value) => (value === 0x82 ? "‚" : String.fromCharCode(value))).join(
-        "",
-      );
+    if (options.encoding === "iso88591" || options.encoding === "windows1252") {
+      return String.fromCharCode(...bytes);
     }
     return decode(bytes, options);
   };
   h.workspace.encode = async (text, options) => {
-    if (options.encoding === "iso88591") {
+    if (options.encoding === "iso88591" || options.encoding === "windows1252") {
       return Uint8Array.from(text, (char) => char.charCodeAt(0));
-    }
-    if (options.encoding === "windows1252") {
-      return Uint8Array.from(text, (char) => (char === "‚" ? 0x82 : char.charCodeAt(0)));
     }
     return encode(text, options);
   };
@@ -604,6 +601,26 @@ test("legacy save enforcement warns without rewriting successive saves", async (
   await h.save("a.txt", "newest");
   assert.equal(await readFile(h.uri("a.txt").fsPath, "utf8"), "newest");
   assert.equal(h.messages.filter((message) => message.startsWith("Save warning:")).length, 2);
+});
+
+test("single file conversion previews decoded ISO-2022-JP text, hides EOL-only presets, and converts to UTF-8", async (t) => {
+  const jisBytes = Uint8Array.from([
+    0x1b, 0x24, 0x42, 0x46, 0x7c, 0x4b, 0x5c, 0x38, 0x6c, 0x1b, 0x28, 0x42, 0x0a,
+  ]);
+  const h = await harness(t, { "jis.txt": jisBytes });
+  let hasEolOnlyPreset = true;
+  h.picks.push((items: Record<string, unknown>[]) => {
+    hasEolOnlyPreset = items.some((item) => !item.targetEncoding && Boolean(item.targetLineEnding));
+    return items.find((item) => item.targetEncoding === "utf8" && !item.targetLineEnding);
+  });
+  const selected = await h.fileSelection("jis.txt");
+  assert.ok(selected);
+  const placeHolder = h.shownPicks[0]?.placeHolder ?? "";
+  assert.match(placeHolder, /ISO-2022-JP \(JIS\)/);
+  assert.match(placeHolder, /Preview: L1: 日本語/);
+  assert.equal(hasEolOnlyPreset, false);
+  assert.equal(selected.sourceEncoding, "iso2022jp");
+  assert.equal(selected.targetEncoding, "utf8");
 });
 
 test("save warns when a configured file contains a replacement character even if the encoding matches", async (t) => {

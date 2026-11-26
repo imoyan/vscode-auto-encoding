@@ -166,3 +166,9 @@ test("rankDecodedCandidates never marks a candidate containing U+FFFD as likely"
   assert.equal(ranked[0]?.encoding, "utf8");
   assert.equal(ranked[0]?.likely, false);
 });
+
+test("scoreDecodedText favors Hangul text over mojibake", () => {
+  const hangul = scoreDecodedText("안녕하세요 테스트입니다");
+  const mojibake = scoreDecodedText("¾È³çÇÏ¼¼¿ä");
+  assert.ok(hangul.avgScore > mojibake.avgScore);
+});

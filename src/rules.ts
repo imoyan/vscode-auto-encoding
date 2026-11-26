@@ -28,16 +28,73 @@ const compiledRules = new WeakMap<
   }
 >();
 
+export const ISO2022JP_ENCODING = "iso2022jp" as const;
+
 export const ENCODINGS = [
   { id: "utf8", label: "UTF-8", badge: "U8" },
   { id: "utf8bom", label: "UTF-8 with BOM", badge: "UB" },
   { id: "shiftjis", label: "Shift JIS / CP932", badge: "SJ" },
   { id: "eucjp", label: "EUC-JP", badge: "EJ" },
+  { id: "gb18030", label: "GB18030", badge: "GB" },
+  { id: "big5hkscs", label: "Big5 (HKSCS)", badge: "B5" },
+  { id: "euckr", label: "EUC-KR", badge: "KR" },
   { id: "windows1252", label: "Windows-1252", badge: "W2" },
   { id: "iso88591", label: "ISO-8859-1", badge: "L1" },
   { id: "utf16le", label: "UTF-16 LE", badge: "16" },
   { id: "utf16be", label: "UTF-16 BE", badge: "16" },
 ] as const;
+
+export const SOURCE_ONLY_ENCODINGS = [
+  { id: ISO2022JP_ENCODING, label: "ISO-2022-JP (JIS)", badge: "JI" },
+] as const;
+
+export const AUTO_DETECT_ENCODING_IDS = [
+  "shiftjis",
+  "eucjp",
+  "gb18030",
+  "big5hkscs",
+  "euckr",
+  "windows1252",
+  "iso88591",
+] as const;
+
+export const DEFAULT_AUTO_DETECT_ENCODINGS: readonly string[] = ["shiftjis", "eucjp"];
+
+const AUTO_DETECT_ENCODING_SET = new Set<string>(AUTO_DETECT_ENCODING_IDS);
+const LEGACY_MULTIBYTE_ENCODING_SET = new Set<string>([
+  "shiftjis",
+  "eucjp",
+  "gb18030",
+  "big5hkscs",
+  "euckr",
+]);
+
+/** Returns whether an encoding is a non-UTF-8 legacy multibyte encoding. */
+export function isLegacyMultibyteEncoding(encoding: string): boolean {
+  return LEGACY_MULTIBYTE_ENCODING_SET.has(encoding.toLowerCase());
+}
+
+/** Returns whether VS Code can reopen and save files in the given encoding. */
+export function isReopenableEncoding(encoding: string): boolean {
+  return encoding.toLowerCase() !== ISO2022JP_ENCODING;
+}
+
+/** Validates and normalizes `autoEncoding.autoDetectEncodings`. */
+export function sanitizeAutoDetectEncodings(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) {
+    return DEFAULT_AUTO_DETECT_ENCODINGS;
+  }
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const normalized = entry.toLowerCase();
+    if (!AUTO_DETECT_ENCODING_SET.has(normalized) || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
 
 export function isSupportedEncoding(encoding: string): boolean {
   return ENCODINGS.some((candidate) => candidate.id === encoding);
@@ -141,8 +198,10 @@ export function encodingInfo(encoding: string): {
   readonly label: string;
   readonly badge: string;
 } {
+  const normalized = encoding.toLowerCase();
   return (
-    ENCODINGS.find((candidate) => candidate.id === encoding) ?? {
+    ENCODINGS.find((candidate) => candidate.id === normalized) ??
+    SOURCE_ONLY_ENCODINGS.find((candidate) => candidate.id === normalized) ?? {
       id: encoding,
       label: encoding,
       badge: "?",

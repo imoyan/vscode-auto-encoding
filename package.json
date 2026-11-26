@@ -145,6 +145,9 @@
                   "utf8bom",
                   "shiftjis",
                   "eucjp",
+                  "gb18030",
+                  "big5hkscs",
+                  "euckr",
                   "windows1252",
                   "iso88591",
                   "utf16le",
@@ -166,6 +169,28 @@
           "scope": "resource",
           "default": true,
           "markdownDescription": "%config.autoReopenGitComparison.description%"
+        },
+        "autoEncoding.autoDetectEncodings": {
+          "type": "array",
+          "scope": "resource",
+          "default": [
+            "shiftjis",
+            "eucjp"
+          ],
+          "uniqueItems": true,
+          "markdownDescription": "%config.autoDetectEncodings.description%",
+          "items": {
+            "type": "string",
+            "enum": [
+              "shiftjis",
+              "eucjp",
+              "gb18030",
+              "big5hkscs",
+              "euckr",
+              "windows1252",
+              "iso88591"
+            ]
+          }
         },
         "autoEncoding.warnOnOpen": {
           "type": "boolean",

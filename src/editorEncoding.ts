@@ -1011,7 +1011,7 @@ function autoAlignEnabled(comparison: ActiveComparison): boolean {
   return configurationFor(scopeUri).get<boolean>("autoReopenGitComparison", true);
 }
 
-function visibleEmbeddedGitComparisons(hintUri?: vscode.Uri): readonly ActiveComparison[] {
+function visibleEmbeddedGitComparisons(hintUris: readonly vscode.Uri[] = []): readonly ActiveComparison[] {
   const seen = new Set<string>();
   const comparisons: ActiveComparison[] = [];
   const pushGitUri = (gitUri: vscode.Uri): void => {
@@ -1027,8 +1027,10 @@ function visibleEmbeddedGitComparisons(hintUri?: vscode.Uri): readonly ActiveCom
       multiDiff: true,
     });
   };
-  if (hintUri?.scheme === "git") {
-    pushGitUri(hintUri);
+  for (const hintUri of hintUris) {
+    if (hintUri.scheme === "git") {
+      pushGitUri(hintUri);
+    }
   }
   for (const editor of vscode.window.visibleTextEditors ?? []) {
     if (editor.document.uri.scheme === "git") {
@@ -1040,19 +1042,27 @@ function visibleEmbeddedGitComparisons(hintUri?: vscode.Uri): readonly ActiveCom
 
 let aligning = false;
 let alignAgain = false;
-let pendingAlignHint: vscode.Uri | undefined;
+const pendingAlignHints = new Map<string, vscode.Uri>();
 
 /** Keeps active Git/Multi-Diff comparisons, embedded diff views, and single Git views in the expected or detected encoding (display only, never saves). */
 export async function alignActiveComparison(hintUri?: vscode.Uri): Promise<boolean> {
-  if (hintUri?.scheme === "git") pendingAlignHint = hintUri;
+  if (hintUri?.scheme === "git") {
+    const key = hintUri.toString();
+    if (pendingAlignHints.has(key)) pendingAlignHints.delete(key);
+    else if (pendingAlignHints.size >= MAX_MULTI_DIFF_ENTRIES) {
+      const oldest = pendingAlignHints.keys().next().value;
+      if (oldest !== undefined) pendingAlignHints.delete(oldest);
+    }
+    pendingAlignHints.set(key, hintUri);
+  }
   if (aligning) { alignAgain = true; return false; }
   aligning = true;
   let changed = false;
   try {
     do {
       alignAgain = false;
-      const currentHint = pendingAlignHint;
-      pendingAlignHint = undefined;
+      const currentHints = [...pendingAlignHints.values()];
+      pendingAlignHints.clear();
       const multiDiffs = activeMultiDiffComparisons();
       if (multiDiffs.length > 0) {
         const focused = activeComparison();
@@ -1124,7 +1134,7 @@ export async function alignActiveComparison(hintUri?: vscode.Uri): Promise<boole
         }
         continue;
       }
-      const embedded = visibleEmbeddedGitComparisons(currentHint);
+      const embedded = visibleEmbeddedGitComparisons(currentHints);
       for (const embeddedComparison of embedded) {
         if (!autoAlignEnabled(embeddedComparison)) continue;
         const leftDoc = findDocument(embeddedComparison.original);

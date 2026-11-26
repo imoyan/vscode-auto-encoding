@@ -637,3 +637,38 @@ test("embedded git diff views outside tabGroups align git and working file sides
   assert.equal(workingDoc.encoding, "shiftjis");
   assert.equal(h.commands.length, 0);
 });
+
+test("concurrent embedded git hints are queued and all aligned without dropping intermediate files", async (t) => {
+  const h = await harness(t);
+  const path2 = path.join(h.root, "second.dat");
+  const path3 = path.join(h.root, "third.dat");
+  const file2 = Uri.file(path2);
+  const file3 = Uri.file(path3);
+  const git2 = new Uri("git", path2, "ref=HEAD");
+  const git3 = new Uri("git", path3, "ref=HEAD");
+  await writeFile(h.filePath, SJIS_JA);
+  await writeFile(path2, SJIS_JA);
+  await writeFile(path3, SJIS_JA);
+  h.gitBlobs.set(h.headUri.toString(), SJIS_JA);
+  h.gitBlobs.set(git2.toString(), SJIS_JA);
+  h.gitBlobs.set(git3.toString(), SJIS_JA);
+
+  const g1 = h.doc(h.headUri, "utf8");
+  const f1 = h.doc(h.fileUri, "utf8");
+  const g2 = h.doc(git2, "utf8");
+  const f2 = h.doc(file2, "utf8");
+  const g3 = h.doc(git3, "utf8");
+  const f3 = h.doc(file3, "utf8");
+
+  const alignWithHint = h.runtime.alignActiveComparison as (hint?: unknown) => Promise<boolean>;
+  // Fire three embedded git hints concurrently while the first is still awaiting byte reads
+  await Promise.all([alignWithHint(h.headUri), alignWithHint(git2), alignWithHint(git3)]);
+
+  assert.equal(g1.encoding, "shiftjis");
+  assert.equal(f1.encoding, "shiftjis");
+  assert.equal(g2.encoding, "shiftjis");
+  assert.equal(f2.encoding, "shiftjis");
+  assert.equal(g3.encoding, "shiftjis");
+  assert.equal(f3.encoding, "shiftjis");
+  assert.equal(h.commands.length, 0);
+});

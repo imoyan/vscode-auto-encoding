@@ -190,6 +190,7 @@ async function harness(t: TestContext, files: Record<string, Uint8Array>) {
   const folder = { uri: Uri.file(root), name: "workspace", index: 0 };
   const config = new Map<string, unknown>();
   const state = new Map<string, unknown>();
+  const globalState = new Map<string, unknown>();
   const warnings: { message: string; buttons: string[] }[] = [];
   const warningResponses: Array<string | undefined> = [];
   const errors: string[] = [];
@@ -401,8 +402,14 @@ async function harness(t: TestContext, files: Record<string, Uint8Array>) {
     get: (key: string) => state.get(key),
     update: async (key: string, value: unknown) => { state.set(key, value); },
   };
+  const globalMemento = {
+    get: (key: string) => globalState.get(key),
+    update: async (key: string, value: unknown) => { globalState.set(key, value); },
+    setKeysForSync: () => undefined,
+  };
   runtime.activate({
     workspaceState: memento,
+    globalState: globalMemento,
     subscriptions,
     extensionPath: process.cwd(),
     globalStorageUri: Uri.file(path.join(root, "storage")),
@@ -958,7 +965,7 @@ test("editing after ruleUnconfirmed or during reopening never interrupts with di
 
   const doc = await h.openVisible("unconfirmed.java", "utf8", () => h.warnings.length === 1);
   assert.equal(h.warnings.length, 1);
-  assert.deepEqual(h.warnings[0]!.buttons, []);
+  assert.deepEqual(h.warnings[0]!.buttons, ["Convert to Shift JIS / CP932 and Save"]);
   assert.match(h.warnings[0]!.message, /keeping the current encoding/);
 
   // Typing 1 character must NOT trigger a new "Reopen with Expected Encoding" toast
@@ -1159,7 +1166,7 @@ test("ruled UTF-8 file opened as UTF-8 with autoReopen=false keeps current readi
 
   const doc = await h.openVisible("exception.java", "utf8", () => h.warnings.length === 1);
   assert.equal(h.warnings.length, 1);
-  assert.deepEqual(h.warnings[0]!.buttons, []);
+  assert.deepEqual(h.warnings[0]!.buttons, ["Convert to Shift JIS / CP932 and Save"]);
   assert.match(h.warnings[0]!.message, /keeping the current encoding/);
   assert.equal(h.status.text, "$(warning) Open: UTF-8 / Rule: Shift JIS / CP932");
   assert.equal(h.diagnosticsFor("exception.java").length, 1);
@@ -1411,7 +1418,10 @@ test("inspectActiveFile ranks ambiguous candidates with non-ASCII line previews 
 });
 
 test("outside-workspace local files auto-reopen and show status without emitting workspace diagnostics", async (t) => {
-  const h = await harness(t, { "external-sjis.txt": SJIS_JA_ASCII_OK });
+  const h = await harness(t, {
+    "external-sjis.txt": SJIS_JA_ASCII_OK,
+    "external-jis.txt": ISO2022JP_JA,
+  });
   await h.fireWorkspaceFoldersChange([]);
 
   const doc = await h.openVisible(
@@ -1421,4 +1431,95 @@ test("outside-workspace local files auto-reopen and show status without emitting
   );
   assert.equal(doc.encoding, "shiftjis");
   assert.deepEqual(h.diagnosticsFor("external-sjis.txt"), []);
+
+  // QuickPick on outside-workspace file offers convertFile with backup+Undo description, omitting rule registration
+  h.picks.push((items: Record<string, unknown>[]) => {
+    const convert = items.find((item) => item.action === "convertFile");
+    assert.ok(convert);
+    assert.equal(convert.description, "Rewrites the file with local backup and Undo");
+    assert.equal(items.some((item) => item.action === "registerFile" || item.action === "registerFolder"), false);
+    return undefined;
+  });
+  await h.command("inspectActiveFile");
+
+  // ISO-2022-JP outside-workspace file offers 1-click conversion from both open toast and QuickPick
+  h.warnings.length = 0;
+  h.warningResponses.push(undefined);
+  const jisDoc = await h.openVisible(
+    "external-jis.txt",
+    "utf8",
+    () => h.status.text === "$(warning) Open: UTF-8 / Detected: ISO-2022-JP (JIS) (convertible)",
+  );
+  h.picks.push(
+    (items: Record<string, unknown>[]) => {
+      const jisConvert = items.find((item) => item.action === "convertFile");
+      assert.ok(jisConvert);
+      assert.match(String(jisConvert.description), /with local backup and Undo/);
+      return jisConvert;
+    },
+    (items: Record<string, unknown>[]) =>
+      items.find((item) => item.targetEncoding === "utf8" && !item.targetLineEnding),
+  );
+  await h.command("inspectActiveFile");
+  await h.waitFor(
+    () => jisDoc.getText() === "日本語\n",
+    "converted outside-workspace ISO-2022-JP file via QuickPick",
+  );
+  h.warningResponses.push("Undo");
+  assert.equal(await h.command("undoLastConversion"), true);
+  assert.deepEqual(new Uint8Array(await readFile(jisDoc.uri.fsPath)), ISO2022JP_JA);
+});
+
+test("utf8bom rule keeps 0-byte files compatible while surfacing missing BOM on non-empty ASCII with 1-click toast conversion", async (t) => {
+  const h = await harness(t, {
+    "empty.txt": new Uint8Array(),
+    "ascii-no-bom.txt": new TextEncoder().encode("hello\n"),
+  });
+  h.config.set("rules", [{ pattern: "**/*", encoding: "utf8bom" }]);
+
+  // 1. 0-byte empty file auto-reopens as UTF-8 with BOM so first save writes EF BB BF.
+  const emptyDoc = await h.openVisible(
+    "empty.txt",
+    "utf8",
+    (d) => d.encoding === "utf8bom" && h.status.text === "$(pass) Rule: UTF-8 with BOM",
+  );
+  assert.equal(emptyDoc.encoding, "utf8bom");
+  assert.deepEqual(h.diagnosticsFor("empty.txt"), []);
+
+  // 2. Non-empty BOM-less ASCII file surfaces Actual: UTF-8, Diagnostic, and 1-click toast conversion + Undo.
+  h.warnings.length = 0;
+  h.warningResponses.push(undefined);
+  const asciiDoc = await h.openVisible(
+    "ascii-no-bom.txt",
+    "utf8",
+    () => h.warnings.length === 1,
+  );
+  assert.equal(h.status.text, "$(warning) Open: UTF-8 / Rule: UTF-8 with BOM (Actual: UTF-8)");
+  assert.equal(
+    h.diagnosticsFor("ascii-no-bom.txt")[0]?.message,
+    "Saved bytes differ from configured rule (UTF-8 with BOM). Detected: UTF-8",
+  );
+  assert.deepEqual(h.warnings[0]?.buttons, ["Convert to UTF-8 with BOM and Save"]);
+
+  // Close and reopen, clicking the 1-click toast action to convert to UTF-8 with BOM
+  h.events.get("close")!.fire(asciiDoc);
+  h.warnings.length = 0;
+  h.warningResponses.push("Convert to UTF-8 with BOM and Save");
+  const reopenedAscii = await h.openVisible(
+    "ascii-no-bom.txt",
+    "utf8",
+    (d) => d.encoding === "utf8bom" && h.status.text === "$(pass) Rule: UTF-8 with BOM",
+  );
+  assert.deepEqual(
+    new Uint8Array(await readFile(reopenedAscii.uri.fsPath)),
+    Uint8Array.from([0xef, 0xbb, 0xbf, ...new TextEncoder().encode("hello\n")]),
+  );
+  assert.deepEqual(h.diagnosticsFor("ascii-no-bom.txt"), []);
+
+  h.warningResponses.push("Undo");
+  assert.equal(await h.command("undoLastConversion"), true);
+  assert.deepEqual(
+    new Uint8Array(await readFile(reopenedAscii.uri.fsPath)),
+    new TextEncoder().encode("hello\n"),
+  );
 });

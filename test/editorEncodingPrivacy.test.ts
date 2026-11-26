@@ -38,9 +38,8 @@ async function harness(t: TestContext) {
   const workspace = {
     getWorkspaceFolder: () => folder,
     getConfiguration: () => ({
-      get: (key: string, fallback?: unknown) => key === "rules"
-        ? [{ pattern: "**/*", encoding: "utf8bom" }]
-        : key === "enforceOnSave" ? true : fallback,
+      get: (key: string, fallback?: unknown) =>
+        key === "rules" ? [{ pattern: "**/*", encoding: "utf8bom" }] : fallback,
     }),
     encode: async (text: string, options: { encoding: string }) => {
       if (failure === "encode") throw thrown;

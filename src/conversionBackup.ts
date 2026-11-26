@@ -10,12 +10,22 @@ export const PROTECTED_BACKUP_KEY = "autoEncoding.protectedConversionBackup";
 
 const BACKUP_RECORD_LIMIT = 64 * 1024;
 
+/** Returns the state store for conversion Undo pointers in the current window. */
+export function activeConversionState(context: vscode.ExtensionContext): vscode.Memento {
+  const hasWorkspace = (vscode.workspace?.workspaceFolders?.length ?? 0) > 0;
+  if (hasWorkspace) {
+    return context.workspaceState;
+  }
+  return context.globalState ?? context.workspaceState;
+}
+
 export interface BackupRecord {
   readonly version: 1;
   readonly originalUri: string;
   readonly resolvedUri?: string;
   readonly conversionRootUri?: string;
   readonly workspaceRootUri?: string;
+  readonly standalone?: boolean;
   readonly relativePath: string;
   readonly backupFile: string;
   readonly originalHash: string;
@@ -54,6 +64,7 @@ export async function readBackupRecord(uri: vscode.Uri): Promise<BackupRecord | 
       typeof candidate.conversionRootUri !== "string") ||
     (candidate.workspaceRootUri !== undefined &&
       typeof candidate.workspaceRootUri !== "string") ||
+    (candidate.standalone !== undefined && typeof candidate.standalone !== "boolean") ||
     typeof candidate.relativePath !== "string" ||
     typeof candidate.backupFile !== "string" ||
     typeof candidate.originalHash !== "string" ||

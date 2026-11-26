@@ -8,7 +8,11 @@ import {
   bytesEqual,
   looksLikeBinary,
 } from "./conversionCore.js";
-import { LAST_BACKUP_KEY, PROTECTED_BACKUP_KEY } from "./conversionBackup.js";
+import {
+  LAST_BACKUP_KEY,
+  PROTECTED_BACKUP_KEY,
+  activeConversionState,
+} from "./conversionBackup.js";
 import { createWorkspaceCodec, isDirty, hashBytes } from "./conversionResources.js";
 import {
   ENCODINGS,
@@ -19,7 +23,11 @@ import {
   sanitizeAutoDetectEncodings,
 } from "./rules.js";
 import { readPinnedLocalFile } from "./pinnedLocalFile.js";
-import { resolveRealDirectory, resolveRealPathWithin } from "./localPathSafety.js";
+import {
+  resolveRealDirectory,
+  resolveRealPathWithin,
+  resolveStandaloneRegularFile,
+} from "./localPathSafety.js";
 import {
   DEFAULT_MAX_SCAN_FILES,
   DEFAULT_SCAN_EXCLUDE,
@@ -73,6 +81,7 @@ export interface ConversionCandidate extends vscode.QuickPickItem {
   readonly maxSize: number;
   readonly conversionRootRealPath: string;
   readonly workspaceRootRealPath: string;
+  readonly standalone?: boolean;
 }
 
 export interface ConversionSelection {
@@ -139,6 +148,36 @@ export async function selectConversion(
       );
       return undefined;
     }
+    const fileWorkspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
+    if (!fileWorkspaceFolder) {
+      const standaloneFile = await resolveStandaloneRegularFile(fileUri.fsPath);
+      if (!standaloneFile) {
+        void vscode.window.showInformationMessage(
+          t("{0}: Outside target scope or path could not be verified", path.basename(fileUri.fsPath)),
+        );
+        return undefined;
+      }
+      const standaloneConfig = configurationFor(fileUri);
+      const standaloneMaxFileSize = configuredFileSizeLimit(
+        standaloneConfig.get<number>("maxFileSizeKB", 5120),
+      );
+      const standaloneAutoDetect = sanitizeAutoDetectEncodings(
+        standaloneConfig.get<unknown>("autoDetectEncodings"),
+      );
+      return selectSingleFileConversion({
+        context,
+        fileUri,
+        folderUri: vscode.Uri.file(path.dirname(fileUri.fsPath)),
+        folderRealPath: standaloneFile.parentRealPath,
+        workspaceRootRealPath: standaloneFile.parentRealPath,
+        resolvedWritePath: standaloneFile.fileRealPath,
+        standalone: true,
+        maxFileSize: standaloneMaxFileSize,
+        autoDetectEncodings: standaloneAutoDetect,
+        expectedEncodingFor,
+        suppliedTargetEncoding,
+      });
+    }
   }
   const folderUri = fileUri
     ? vscode.Uri.file(path.dirname(fileUri.fsPath))
@@ -185,7 +224,8 @@ export async function selectConversion(
     });
   }
 
-  if (!(await confirmProtectedBackup(context))) {
+  const state = activeConversionState(context);
+  if (!(await confirmProtectedBackup(state))) {
     return undefined;
   }
 
@@ -345,7 +385,7 @@ export async function selectConversion(
           : t("Auto-detect (keep encoding)")) + ` / ${eolPart}`
       : `${encodingInfo(selectedSource).label} → ${encodingInfo(targetEncoding).label} / ${eolPart}`;
 
-  const backupNotice = replacingBackupNotice(context);
+  const backupNotice = replacingBackupNotice(state);
   const needsConfirmationCount = selected.filter((candidate) => candidate.needsConfirmation).length;
   const confirmAction = t("Convert");
   const confirm = await vscode.window.showWarningMessage(
@@ -598,6 +638,8 @@ async function selectSingleFileConversion(options: {
   readonly folderUri: vscode.Uri;
   readonly folderRealPath: string;
   readonly workspaceRootRealPath: string;
+  readonly resolvedWritePath?: string;
+  readonly standalone?: boolean;
   readonly maxFileSize: number;
   readonly autoDetectEncodings: readonly string[];
   readonly expectedEncodingFor: (uri: vscode.Uri) => string | undefined;
@@ -609,13 +651,16 @@ async function selectSingleFileConversion(options: {
     folderUri,
     folderRealPath,
     workspaceRootRealPath,
+    resolvedWritePath,
+    standalone = false,
     maxFileSize,
     autoDetectEncodings,
     expectedEncodingFor,
     suppliedTargetEncoding,
   } = options;
   const basename = path.basename(fileUri.fsPath);
-  const resolvedPath = await resolveRealPathWithin(folderRealPath, fileUri.fsPath);
+  const resolvedPath =
+    resolvedWritePath ?? (await resolveRealPathWithin(folderRealPath, fileUri.fsPath));
   if (!resolvedPath) {
     void vscode.window.showInformationMessage(
       t("{0}: Outside target scope or path could not be verified", basename),
@@ -664,7 +709,8 @@ async function selectSingleFileConversion(options: {
     void vscode.window.showInformationMessage(`${basename}: ${skipReasonLabel("binary")}`);
     return undefined;
   }
-  if (!(await confirmProtectedBackup(context))) {
+  const state = activeConversionState(context);
+  if (!(await confirmProtectedBackup(state))) {
     return undefined;
   }
 
@@ -691,11 +737,7 @@ async function selectSingleFileConversion(options: {
     const currentEolLabel = formatLineEndingSummary(
       classifyLineEndings(original, currentEncodingHint ?? detectUtf16Signal(original)),
     );
-    const decodedIso2022Jp =
-      currentEncodingHint === ISO2022JP_ENCODING ? decodeIso2022JpStrict(original) : undefined;
-    const sourcePreview = decodedIso2022Jp
-      ? extractNonAsciiPreview(decodedIso2022Jp, { maxLength: 60 })
-      : undefined;
+    const sourcePreview = await decodeSourcePreview(original, currentEncodingHint);
     const preset = await pickConversionPreset({
       ruleEncoding: fileRuleEncoding,
       currentEncodingHint,
@@ -716,6 +758,7 @@ async function selectSingleFileConversion(options: {
     allowRuleDisambiguation: false,
     isCancellationRequested: () => false,
   });
+  const needsConfirmation = autoResolved.kind === "ambiguous";
   let sourceEncoding: string | undefined;
   if (autoResolved.kind === "resolved") {
     sourceEncoding = autoResolved.encoding;
@@ -764,7 +807,8 @@ async function selectSingleFileConversion(options: {
     maxSize: maxFileSize,
     conversionRootRealPath: folderRealPath,
     workspaceRootRealPath,
-    needsConfirmation: false,
+    ...(standalone ? { standalone: true } : {}),
+    needsConfirmation,
     label: relativePath,
     description: `${encodingInfo(sourceEncoding).label} → ${encodingInfo(targetEncoding).label} / ${eolLabel} → ${targetLineEnding?.toUpperCase() ?? eolLabel}`,
     detail: previewText(assessment.prepared.text),
@@ -779,7 +823,71 @@ async function selectSingleFileConversion(options: {
     return undefined;
   }
 
+  if (needsConfirmation) {
+    const eolPart = targetLineEnding
+      ? t("EOL → {0}", targetLineEnding.toUpperCase())
+      : t("Keep EOL");
+    const conversionDescription = `${encodingInfo(sourceEncoding).label} → ${encodingInfo(targetEncoding).label} / ${eolPart}`;
+    const backupNotice = replacingBackupNotice(state);
+    const confirmAction = t("Convert");
+    const confirm = await vscode.window.showWarningMessage(
+      t("Convert {0} file(s)? {1}.", 1, conversionDescription) +
+        ` ${t("{0} file(s) have uncertain encoding detection.", 1)}` +
+        ` ${t("Original data ({0}) will be backed up locally.", formatByteSize(backupBytes))}` +
+        backupNotice,
+      { modal: true },
+      confirmAction,
+    );
+    if (confirm !== confirmAction) {
+      return undefined;
+    }
+  }
+
   return { selected: [candidate], sourceEncoding, targetEncoding, targetLineEnding };
+}
+
+async function decodeSourcePreview(
+  bytes: Uint8Array,
+  encoding: string | undefined,
+): Promise<string | undefined> {
+  if (!encoding) {
+    return undefined;
+  }
+  const normalized = encoding.toLowerCase();
+  if (normalized === ISO2022JP_ENCODING) {
+    const decoded = decodeIso2022JpStrict(bytes);
+    return decoded ? extractNonAsciiPreview(decoded, { maxLength: 60 }) : undefined;
+  }
+  const bomOffset =
+    normalized === "utf8bom" &&
+    bytes[0] === 0xef &&
+    bytes[1] === 0xbb &&
+    bytes[2] === 0xbf
+      ? 3
+      : 0;
+  const decodeTarget = normalized === "utf8bom" ? "utf8" : normalized;
+  try {
+    const decoded = await vscodeCodec.decode(bytes.subarray(bomOffset), decodeTarget);
+    if (decoded.includes("\uFFFD") || looksLikeBinary(decoded)) {
+      return undefined;
+    }
+    const clean = decoded.replace(/^\uFEFF/, "");
+    if (!hasNonAsciiCharacter(clean)) {
+      return undefined;
+    }
+    return extractNonAsciiPreview(clean, { maxLength: 60 });
+  } catch {
+    return undefined;
+  }
+}
+
+function hasNonAsciiCharacter(text: string): boolean {
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) >= 0x80) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const COMMON_ENCODING_IDS = new Set(["utf8", "utf8bom", "shiftjis", "eucjp"]);
@@ -883,10 +991,10 @@ async function pickConversionPreset(options: {
   });
 }
 
-async function confirmProtectedBackup(context: vscode.ExtensionContext): Promise<boolean> {
+async function confirmProtectedBackup(state: vscode.Memento): Promise<boolean> {
   const previousSession = protectedConversionSession(
-    context.workspaceState.get<unknown>(LAST_BACKUP_KEY),
-    context.workspaceState.get<unknown>(PROTECTED_BACKUP_KEY),
+    state.get<unknown>(LAST_BACKUP_KEY),
+    state.get<unknown>(PROTECTED_BACKUP_KEY),
   );
   if (!previousSession) {
     return true;
@@ -904,12 +1012,12 @@ async function confirmProtectedBackup(context: vscode.ExtensionContext): Promise
   return proceed === keepAction;
 }
 
-function replacingBackupNotice(context: vscode.ExtensionContext): string {
-  const storedBackup = context.workspaceState.get<unknown>(LAST_BACKUP_KEY);
+function replacingBackupNotice(state: vscode.Memento): string {
+  const storedBackup = state.get<unknown>(LAST_BACKUP_KEY);
   const replacingBackup =
     typeof storedBackup === "string" &&
     storedBackup.length > 0 &&
-    storedBackup !== context.workspaceState.get<unknown>(PROTECTED_BACKUP_KEY);
+    storedBackup !== state.get<unknown>(PROTECTED_BACKUP_KEY);
   return replacingBackup
     ? ` ${t("Once the new conversion succeeds, the previous backup will be deleted and cannot be undone.")}`
     : "";

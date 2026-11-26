@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { mkdtemp, rm, writeFile as writeNodeFile } from "node:fs/promises";
+import * as path from "node:path";
 import * as vscode from "vscode";
-import { release } from "node:os";
+import { release, tmpdir } from "node:os";
 import {
   picks,
   confirmations,
@@ -156,6 +158,7 @@ export async function run(): Promise<void> {
     { title: "Select Target Format", label: "UTF-8" },
     { title: "Select Current Encoding", label: "Windows-1252" },
   );
+  confirmations.push("Convert");
   assert.equal(await command("convertFile", target), true);
   assert.equal(targetIsLoaded(), false);
   assert.deepEqual(Buffer.from(await vscode.workspace.fs.readFile(target)), Buffer.from("café\r\n"));
@@ -164,6 +167,30 @@ export async function run(): Promise<void> {
   assert.equal(await command("undoLastConversion"), true);
   assert.deepEqual(Buffer.from(await vscode.workspace.fs.readFile(target)), Buffer.from(original));
   assert.equal(targetIsLoaded(), false);
+
+  const externalDir = await mkdtemp(path.join(tmpdir(), "auto-encoding-host-external-"));
+  try {
+    const externalFile = vscode.Uri.file(path.join(externalDir, "external-sjis.txt"));
+    const externalSjis = await vscode.workspace.encode("// 外部ファイル\r\n", {
+      encoding: "shiftjis",
+    });
+    await writeNodeFile(externalFile.fsPath, externalSjis);
+    assert.equal(vscode.workspace.getWorkspaceFolder(externalFile), undefined);
+    picks.push({ title: "Select Target Format", label: "UTF-8" });
+    assert.equal(await command("convertFile", externalFile), true);
+    assert.deepEqual(
+      Buffer.from(await vscode.workspace.fs.readFile(externalFile)),
+      Buffer.from("// 外部ファイル\r\n", "utf8"),
+    );
+    confirmations.push("Undo");
+    assert.equal(await command("undoLastConversion"), true);
+    assert.deepEqual(
+      Buffer.from(await vscode.workspace.fs.readFile(externalFile)),
+      Buffer.from(externalSjis),
+    );
+  } finally {
+    await rm(externalDir, { recursive: true, force: true });
+  }
 
   const cp932AliasHost = vscode.Uri.joinPath(conversionFolder, "cp932-alias.txt");
   const cp932AliasBytes = Uint8Array.from([0xfa, 0x4a, 0x0d, 0x0a]);

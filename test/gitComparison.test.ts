@@ -672,3 +672,18 @@ test("concurrent embedded git hints are queued and all aligned without dropping 
   assert.equal(f3.encoding, "shiftjis");
   assert.equal(h.commands.length, 0);
 });
+
+test("unruled Git comparison aligns BOM-less ASCII Git side with utf8bom working file", async (t) => {
+  const h = await harness(t);
+  await writeFile(
+    h.filePath,
+    Uint8Array.from([0xef, 0xbb, 0xbf, ...new TextEncoder().encode("日本語\n")]),
+  );
+  h.gitBlobs.set(h.headUri.toString(), new TextEncoder().encode("ascii header\n"));
+  const headDoc = h.doc(h.headUri, "utf8");
+  const workingDoc = h.doc(h.fileUri, "utf8");
+  h.show(h.headUri, h.fileUri);
+  assert.equal(await h.align(), true);
+  assert.equal(headDoc.encoding, "utf8bom");
+  assert.equal(workingDoc.encoding, "utf8bom");
+});

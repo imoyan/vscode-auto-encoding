@@ -9,6 +9,7 @@ import {
   resolveRealDirectory,
   resolveMissingRecoveryPath,
   resolveRealPathWithin,
+  resolveStandaloneRegularFile,
 } from "../src/localPathSafety.js";
 
 test("accepts real files contained by a workspace root", async (context) => {
@@ -136,3 +137,40 @@ test("rejects linked backup parents and linked sessions", { skip: process.platfo
   assert.equal(await isConversionBackupSessionPath(storage, path.join(parent, name)), false);
   assert.ok(await realpath(path.join(outside, name)));
 });
+
+test(
+  "resolveStandaloneRegularFile canonicalizes parent symlinks while rejecting leaf symlinks and directories",
+  { skip: process.platform === "win32" ? "symlink permissions vary on Windows" : false },
+  async (context) => {
+    const root = await mkdtemp(path.join(tmpdir(), "standalone-path-"));
+    context.after(() => rm(root, { recursive: true, force: true }));
+    const realDir = path.join(root, "real-dir");
+    const linkedParent = path.join(root, "linked-parent");
+    await mkdir(realDir, { recursive: true });
+    await symlink(realDir, linkedParent, "dir");
+
+    const realFile = path.join(realDir, "note.txt");
+    await writeFile(realFile, "hello");
+    const canonicalDir = await realpath(realDir);
+    const canonicalFile = await realpath(realFile);
+
+    // Direct regular file and regular file accessed via symlinked parent directory both succeed
+    assert.deepEqual(await resolveStandaloneRegularFile(realFile), {
+      parentRealPath: canonicalDir,
+      fileRealPath: canonicalFile,
+    });
+    assert.deepEqual(await resolveStandaloneRegularFile(path.join(linkedParent, "note.txt")), {
+      parentRealPath: canonicalDir,
+      fileRealPath: canonicalFile,
+    });
+
+    // Leaf symlink (even within the same directory) is rejected
+    const sameDirAlias = path.join(realDir, "alias.txt");
+    await symlink(realFile, sameDirAlias);
+    assert.equal(await resolveStandaloneRegularFile(sameDirAlias), undefined);
+
+    // Directory and missing file are rejected
+    assert.equal(await resolveStandaloneRegularFile(realDir), undefined);
+    assert.equal(await resolveStandaloneRegularFile(path.join(realDir, "missing.txt")), undefined);
+  },
+);

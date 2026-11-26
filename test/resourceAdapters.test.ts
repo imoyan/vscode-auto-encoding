@@ -78,6 +78,12 @@ test("conversion refresh only reloads an already-open clean document", async () 
   await resources.reopenCleanDocument(uri, "utf8");
   assert.equal(calls.length, 1);
   assert.equal(calls[0]![0], uri);
+  assert.equal((calls[0]![1] as { encoding: string }).encoding, "utf8");
+
+  // Source-only ISO-2022-JP falls back to utf8 so Undo reloads restored bytes cleanly
+  await resources.reopenCleanDocument(uri, "iso2022jp");
+  assert.equal(calls.length, 2);
+  assert.equal((calls[1]![1] as { encoding: string }).encoding, "utf8");
 });
 
 test("Explorer badge setting gates rule badges cleanly", () => {
@@ -207,6 +213,7 @@ test("undo retains recovery state, rejects replacements and clears read-only com
     "./conversionBackup.js": {
       LAST_BACKUP_KEY: "last",
       PROTECTED_BACKUP_KEY: "protected",
+      activeConversionState: (ctx: { workspaceState: unknown }) => ctx.workspaceState,
       isConversionBackupSession: () => true,
       readBackupRecord: async () => record,
       readBackupResource: async () => ({ bytes: Buffer.from("original") }),
@@ -261,6 +268,10 @@ test("undo retains recovery state, rejects replacements and clears read-only com
     "./localPathSafety.js": {
       resolveRealDirectory: async (value: string) => value,
       resolveRealPathWithin: async (_root: string, value: string) => value,
+      resolveStandaloneRegularFile: async (value: string) => ({
+        parentRealPath: path.dirname(value),
+        fileRealPath: value,
+      }),
     },
   });
   const context = {
@@ -360,6 +371,32 @@ test("file-backed UNC storage reaches filesystem containment checks", async () =
     false,
   );
   assert.equal(checks, 1);
+});
+
+test("activeConversionState uses workspaceState when folders are open and globalState in empty windows", () => {
+  let workspaceFolders: unknown[] | undefined = [{ name: "ws" }];
+  const backup = loadModule<{
+    activeConversionState(context: unknown): unknown;
+  }>("conversionBackup.ts", {
+    "node:crypto": {},
+    vscode: {
+      workspace: {
+        get workspaceFolders() {
+          return workspaceFolders;
+        },
+      },
+    },
+    "./conversionCore.js": {},
+    "./stableResourceRead.js": {},
+    "./localPathSafety.js": {},
+  });
+  const wsState = { kind: "workspace" };
+  const globalState = { kind: "global" };
+  assert.equal(backup.activeConversionState({ workspaceState: wsState, globalState }), wsState);
+  workspaceFolders = [];
+  assert.equal(backup.activeConversionState({ workspaceState: wsState, globalState }), globalState);
+  workspaceFolders = undefined;
+  assert.equal(backup.activeConversionState({ workspaceState: wsState, globalState }), globalState);
 });
 
 test("reopening a comparison side preserves both URIs and labels their encodings", async () => {

@@ -62,7 +62,8 @@
 | `autoEncoding.autoDetectEncodings` | `["shiftjis", "eucjp"]` | Priority candidate encodings checked during auto-detection besides UTF-8, BOM, and ISO-2022-JP (`gb18030`, `big5hkscs`, `euckr`, `windows1252`, `iso88591` can be added, or set `[]` to disable legacy multibyte auto-detection). |
 | `autoEncoding.warnOnOpen` | `true` | Warn when auto-reopen is disabled or decode loss is detected on open. |
 | `autoEncoding.warnOnSave` | `true` | Warn on save for encoding mismatch, decode loss, or `U+FFFD` replacement characters. |
-| `autoEncoding.showExplorerBadges` | `true` | Show encoding badges on configured folders and rule-matched files in the Explorer. |
+| `autoEncoding.statusBarVisibility` | `"relevant"` | Status bar visibility (`"relevant"` hides on clean default files, `"compact"` shows a minimal icon, `"always"` shows the full label). |
+| `autoEncoding.explorerBadges` | `"boundaries"` | Explorer encoding badges (`"boundaries"` shows configured folders and file-level overrides/globs without masking Git colors, `"all"`, or `"none"`). |
 | `autoEncoding.conversionExclude` | `**/{.git,.hg,.svn,.vscode,.idea,node_modules,.next,dist,build,.dart_tool}/**` | Glob pattern excluded from batch folder conversion. |
 | `autoEncoding.maxFileSizeKB` | `5120` | Max file size in KiB (1–32768) for detection and conversion. |
 | `autoEncoding.maxScanFiles` | `5000` | Max file count (1–50000) scanned in a single batch folder conversion. |

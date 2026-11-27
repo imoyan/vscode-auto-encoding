@@ -1,3 +1,5 @@
+// Encoding rule definitions, supported charset metadata, and bounded glob matching helpers.
+
 import { escape } from "minimatch";
 import {
   compileGlob,
@@ -152,6 +154,17 @@ export function patternForFolder(relativePath: string): string {
   return normalized.length === 0 ? "**" : `${patternForFile(normalized)}/**`;
 }
 
+/** Returns the workspace-relative glob patterns recognized as direct folder registrations. */
+export function folderRegistrationPatterns(relativePath: string): readonly string[] {
+  const normalized = normalizeRelativePath(relativePath);
+  if (normalized.length === 0) {
+    return ["**", "**/*"];
+  }
+  const prefix = patternForFile(normalized);
+  return [`${prefix}/**`, `${prefix}/**/*`];
+}
+
+/** Finds a direct single-file rule registration for the given workspace-relative path. */
 export function findFileRegistration(
   rules: readonly EncodingRule[],
   relativePath: string,
@@ -162,14 +175,20 @@ export function findFileRegistration(
   return rules.find((rule) => (nocase ? rule.pattern.toLowerCase() : rule.pattern) === expected);
 }
 
+/** Finds a direct folder rule registration for the given workspace-relative path. */
 export function findFolderRegistration(
   rules: readonly EncodingRule[],
   relativePath: string,
   nocase = process.platform !== "linux",
 ): EncodingRule | undefined {
-  const pattern = patternForFolder(relativePath);
-  const expected = nocase ? pattern.toLowerCase() : pattern;
-  return rules.find((rule) => (nocase ? rule.pattern.toLowerCase() : rule.pattern) === expected);
+  const candidates = new Set(
+    folderRegistrationPatterns(relativePath).map((pattern) =>
+      nocase ? pattern.toLowerCase() : pattern,
+    ),
+  );
+  return rules.find((rule) =>
+    candidates.has(nocase ? rule.pattern.toLowerCase() : rule.pattern),
+  );
 }
 
 export function findMatchingRule(

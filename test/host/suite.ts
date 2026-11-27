@@ -529,9 +529,21 @@ export async function run(): Promise<void> {
     legacyFolder,
     decorationCancellation.token,
   );
+  const inheritedFileDecoration = await decorationProviders[0]?.provideFileDecoration(
+    legacyFile,
+    decorationCancellation.token,
+  );
+  const globFileDecoration = await decorationProviders[0]?.provideFileDecoration(
+    vscode.Uri.joinPath(plain.uri, "check.txt"),
+    decorationCancellation.token,
+  );
   decorationCancellation.dispose();
   assert.equal(decoration?.badge, "SJ");
+  assert.equal(decoration?.color, undefined);
   assert.match(String(decoration?.tooltip), /Folder rule: Shift JIS \/ CP932/);
+  assert.equal(inheritedFileDecoration, undefined);
+  assert.equal(globFileDecoration?.badge, "U8");
+  assert.equal(globFileDecoration?.color, undefined);
 
   // Default autoReopen=true automatically reopens ruled files without extra configuration!
   await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(legacyFile));

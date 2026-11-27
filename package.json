@@ -204,11 +204,37 @@
           "default": true,
           "description": "%config.warnOnSave.description%"
         },
-        "autoEncoding.showExplorerBadges": {
-          "type": "boolean",
+        "autoEncoding.statusBarVisibility": {
+          "type": "string",
           "scope": "resource",
-          "default": true,
-          "description": "%config.showExplorerBadges.description%"
+          "default": "relevant",
+          "enum": [
+            "relevant",
+            "compact",
+            "always"
+          ],
+          "enumDescriptions": [
+            "%config.statusBarVisibility.relevant%",
+            "%config.statusBarVisibility.compact%",
+            "%config.statusBarVisibility.always%"
+          ],
+          "description": "%config.statusBarVisibility.description%"
+        },
+        "autoEncoding.explorerBadges": {
+          "type": "string",
+          "scope": "resource",
+          "default": "boundaries",
+          "enum": [
+            "boundaries",
+            "all",
+            "none"
+          ],
+          "enumDescriptions": [
+            "%config.explorerBadges.boundaries%",
+            "%config.explorerBadges.all%",
+            "%config.explorerBadges.none%"
+          ],
+          "description": "%config.explorerBadges.description%"
         },
         "autoEncoding.conversionExclude": {
           "type": "string",

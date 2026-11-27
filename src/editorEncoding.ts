@@ -369,6 +369,41 @@ function sideName(input: ComparisonInput, side: "original" | "modified"): string
   return t("Right side (Modified, Virtual)");
 }
 
+type StatusBarVisibility = "relevant" | "compact" | "always";
+
+function isTextDocumentLike(
+  target: vscode.Uri | vscode.TextDocument,
+): target is vscode.TextDocument {
+  return "uri" in target;
+}
+
+function effectiveDefaultFilesEncoding(target: vscode.Uri | vscode.TextDocument): string {
+  const uri = isTextDocumentLike(target)
+    ? fileUriForResource(target.uri)
+    : fileUriForResource(target);
+  const languageId =
+    isTextDocumentLike(target) &&
+    typeof target.languageId === "string" &&
+    target.languageId.length > 0
+      ? target.languageId
+      : undefined;
+  const scope: vscode.ConfigurationScope = languageId ? { uri, languageId } : uri;
+  const configured = vscode.workspace
+    .getConfiguration?.("files", scope)
+    ?.get<string>("encoding", "utf8");
+  return typeof configured === "string" && configured.length > 0 ? configured : "utf8";
+}
+
+function effectiveStatusBarVisibility(uri: vscode.Uri): StatusBarVisibility {
+  const scopeUri = fileUriForResource(uri);
+  const folder = vscode.workspace.getWorkspaceFolder?.(scopeUri);
+  const raw = configurationFor(folder ?? scopeUri).get<unknown>("statusBarVisibility", "relevant");
+  if (raw === "compact" || raw === "always") {
+    return raw;
+  }
+  return "relevant";
+}
+
 function syncPreferredResolution(uri: vscode.Uri, counterpartUri?: vscode.Uri): { encoding: string; basis: EncodingBasis; match?: RuleMatch } | undefined {
   const match = resolveRule(uri);
   if (match) return { encoding: match.rule.encoding, basis: "rule", match };
@@ -385,7 +420,7 @@ function syncPreferredResolution(uri: vscode.Uri, counterpartUri?: vscode.Uri): 
     const fileUri = fileUriForResource(candidate);
     const open = findDocument(fileUri);
     if (!open || open.uri.scheme !== "file") continue;
-    const fallback = vscode.workspace.getConfiguration("files", fileUri).get<string>("encoding", "utf8");
+    const fallback = effectiveDefaultFilesEncoding(open);
     if (!sameEncoding(open.encoding, fallback)) {
       const autoDetected = sameEncoding(autoDetectedUris.get(open.uri.toString()), open.encoding);
       return { encoding: open.encoding, basis: autoDetected ? "detected" : "openFile" };
@@ -669,9 +704,11 @@ async function evaluateDocumentBytes(
     const detected = classification.detectedEncoding.toLowerCase();
     if (docEncoding === detected) {
       const replacement = replacementCountIfMatched(inspected, detected);
+      const defaultEncoding = effectiveDefaultFilesEncoding(document);
       const basis: EncodingBasis | undefined = isManual
         ? "openFile"
-        : autoDetectedUris.get(key)?.toLowerCase() === docEncoding || docEncoding !== "utf8"
+        : autoDetectedUris.get(key)?.toLowerCase() === docEncoding ||
+            !sameEncoding(docEncoding, defaultEncoding)
           ? "detected"
           : undefined;
       return {
@@ -2119,7 +2156,7 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
           ? ` (${t("candidates")})`
           : !warn && sides.some((side) => side.res.basis === "openFile")
             ? ` (${t("from working file")})`
-            : !warn && sides.some((side) => side.res.basis === "detected" && side.doc && side.doc.encoding.toLowerCase() !== "utf8")
+            : !warn && sides.some((side) => side.res.basis === "detected" && side.doc && !sameEncoding(side.doc.encoding, effectiveDefaultFilesEncoding(side.doc)))
               ? ` (${t("auto-detected")})`
               : ""
         : "";
@@ -2213,7 +2250,10 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
       return;
     }
     const isInherited = res.basis === "openFile";
-    const isDetected = res.basis === "detected" && (document.encoding.toLowerCase() !== "utf8" || autoDetectedUris.has(document.uri.toString()));
+    const isDetected =
+      res.basis === "detected" &&
+      (!sameEncoding(document.encoding, effectiveDefaultFilesEncoding(document)) ||
+        autoDetectedUris.has(document.uri.toString()));
     const basisSuffix = isInherited
       ? ` (${t("from working file")})`
       : isDetected
@@ -2277,10 +2317,12 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
       status.show();
       return;
     }
+    const defaultEncoding = effectiveDefaultFilesEncoding(document);
     if (
       inspection?.status === "ok" &&
       inspection.basis === "detected" &&
-      (document.encoding.toLowerCase() !== "utf8" || autoDetectedUris.has(document.uri.toString()))
+      (!sameEncoding(document.encoding, defaultEncoding) ||
+        autoDetectedUris.has(document.uri.toString()))
     ) {
       status.text = `$(pass) ${t("{0} (auto-detected · no rule)", actual)}`;
       status.backgroundColor = undefined;
@@ -2292,13 +2334,31 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
       status.show();
       return;
     }
-    status.text = `$(symbol-text) ${t("{0} (no rule)", actual)}`;
-    status.backgroundColor = undefined;
-    status.tooltip = [
+    const isRelevantDefaultOverride =
+      isManualEncodingOverride(document.uri) ||
+      !sameEncoding(document.encoding, defaultEncoding);
+    const visibility = effectiveStatusBarVisibility(document.uri);
+    if (!isRelevantDefaultOverride && visibility === "relevant") {
+      status.backgroundColor = undefined;
+      status.hide();
+      return;
+    }
+    const defaultTooltip = [
+      t("Current: {0}", actual),
       t("No encoding rule is configured for this file."),
       t("Click to reopen with another encoding (no save), register a file/folder encoding rule, or inspect line endings."),
       t("Registered rules are also preserved in VS Code Git comparisons."),
     ].join("\n");
+    if (!isRelevantDefaultOverride && visibility === "compact") {
+      status.text = "$(symbol-text)";
+      status.backgroundColor = undefined;
+      status.tooltip = defaultTooltip;
+      status.show();
+      return;
+    }
+    status.text = `$(symbol-text) ${t("{0} (no rule)", actual)}`;
+    status.backgroundColor = undefined;
+    status.tooltip = defaultTooltip;
     status.show();
     return;
   }

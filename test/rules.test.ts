@@ -6,6 +6,7 @@ import {
   findFileRegistration,
   findFolderRegistration,
   findMatchingRule,
+  folderRegistrationPatterns,
   isReopenableEncoding,
   isSupportedEncoding,
   normalizeRelativePath,
@@ -71,6 +72,25 @@ test("single-file settings match only the literal selected filename and lookup e
   const folderRules = [{ pattern: patternForFolder("legacy/[src]"), encoding: "shiftjis" }];
   assert.equal(findFolderRegistration(folderRules, "legacy/[src]")?.encoding, "shiftjis");
   assert.equal(findFolderRegistration(folderRules, "legacy/other"), undefined);
+
+  assert.deepEqual(folderRegistrationPatterns(""), ["**", "**/*"]);
+  assert.deepEqual(folderRegistrationPatterns("legacy/[src]"), [
+    "legacy/\\[src\\]/**",
+    "legacy/\\[src\\]/**/*",
+  ]);
+  assert.equal(
+    findFolderRegistration([{ pattern: "**/*", encoding: "utf8bom" }], "")?.encoding,
+    "utf8bom",
+  );
+  assert.equal(
+    findFolderRegistration([{ pattern: "Legacy/**/*", encoding: "eucjp" }], "legacy", true)
+      ?.encoding,
+    "eucjp",
+  );
+  assert.equal(
+    findFolderRegistration([{ pattern: "Legacy/**/*", encoding: "eucjp" }], "legacy", false),
+    undefined,
+  );
 });
 
 test("supports East Asian rule encodings, keeps ISO-2022-JP source-only, and sanitizes autoDetectEncodings", () => {

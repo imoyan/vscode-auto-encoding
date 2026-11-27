@@ -681,18 +681,28 @@ test("save warns when a configured file contains a replacement character even if
 test("shows the registered folder encoding badge and supports removing folder/file rules directly", async (t) => {
   const h = await harness(t, {
     "legacy/[source]/Main.java": "class Main {}",
+    "legacy/[source]/Inherited.java": "class Inherited {}",
+    "handwritten/Sub.java": "class Sub {}",
     "other.java": "",
     "not-a-folder": "",
   });
   h.config.set("rules", [
     { pattern: "legacy/\\[source\\]/Main.java", encoding: "utf8" },
     { pattern: "legacy/\\[source\\]/**", encoding: "shiftjis" },
+    { pattern: "handwritten/**/*", encoding: "eucjp" },
     { pattern: "not-a-folder/**", encoding: "shiftjis" },
   ]);
   const folder = await h.folderBadge("legacy/[source]");
   assert.equal(folder?.badge, "SJ");
+  assert.equal(folder?.color, undefined);
   assert.match(String(folder?.tooltip), /Folder rule: Shift JIS \/ CP932/);
+  const handwrittenFolder = await h.folderBadge("handwritten");
+  assert.equal(handwrittenFolder?.badge, "EJ");
+  assert.equal(handwrittenFolder?.color, undefined);
   assert.equal(h.badge("legacy/[source]/Main.java")?.badge, "U8");
+  assert.equal(h.badge("legacy/[source]/Main.java")?.color, undefined);
+  assert.equal(h.badge("legacy/[source]/Inherited.java"), undefined);
+  assert.equal(h.badge("handwritten/Sub.java"), undefined);
   assert.equal(await h.folderBadge("not-a-folder"), undefined);
   assert.equal(h.badge("other.java"), undefined);
 
@@ -713,12 +723,20 @@ test("file settings override a folder setting without changing sibling files and
   );
   await h.command("configureFile", h.uri("one.txt"));
   assert.equal(h.badge("one.txt")?.badge, "UB");
+  assert.equal(h.badge("one.txt")?.color, undefined);
+  assert.equal(h.badge("two.txt"), undefined);
+
+  h.config.set("explorerBadges", "all");
   assert.equal(h.badge("two.txt")?.badge, "U8");
+  assert.equal(h.badge("two.txt")?.color, undefined);
+  h.config.delete("explorerBadges");
 
   h.picks.push((items: Record<string, unknown>[]) =>
     items.find((item) => item.action === "remove"),
   );
   await h.command("configureFile", h.uri("one.txt"));
+  assert.equal(h.badge("one.txt"), undefined);
+  h.config.set("explorerBadges", "all");
   assert.equal(h.badge("one.txt")?.badge, "U8");
 });
 

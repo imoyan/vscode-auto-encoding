@@ -62,7 +62,8 @@
 | `autoEncoding.autoDetectEncodings` | `["shiftjis", "eucjp"]` | UTF-8・BOM・ISO-2022-JP 以外の自動判定で優先的に検査する文字コード候補（`gb18030`・`big5hkscs`・`euckr`・`windows1252`・`iso88591` を追加、または `[]` で無効化可能）。 |
 | `autoEncoding.warnOnOpen` | `true` | 自動開き直しオフ時や読み込み欠損時に通知する。 |
 | `autoEncoding.warnOnSave` | `true` | 保存時に文字コード不一致・読み込み欠損・置換文字（`U+FFFD`）を通知する。 |
-| `autoEncoding.showExplorerBadges` | `true` | 設定済みフォルダー・ルール対象ファイルにエクスプローラーバッジを表示する。 |
+| `autoEncoding.statusBarVisibility` | `"relevant"` | ステータスバー表示範囲（`"relevant"`: 問題のない既定ファイルでは非表示、`"compact"`: 最小アイコン表示、`"always"`: 常時フル表示）。 |
+| `autoEncoding.explorerBadges` | `"boundaries"` | エクスプローラーバッジ表示範囲（`"boundaries"`: Git 色を維持したまま設定フォルダー・個別/拡張子ルール境界のみ表示、`"all"`、`"none"`）。 |
 | `autoEncoding.conversionExclude` | `**/{.git,.hg,.svn,.vscode,.idea,node_modules,.next,dist,build,.dart_tool}/**` | フォルダー一括変換から除外する glob。 |
 | `autoEncoding.maxFileSizeKB` | `5120` | 自動判定・変換の対象にする 1 ファイルあたりの最大サイズ（KiB、最大 32 MiB）。 |
 | `autoEncoding.maxScanFiles` | `5000` | 1 回のフォルダー一括変換で走査する最大ファイル数。 |

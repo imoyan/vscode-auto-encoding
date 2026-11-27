@@ -86,12 +86,22 @@ test("conversion refresh only reloads an already-open clean document", async () 
   assert.equal((calls[1]![1] as { encoding: string }).encoding, "utf8");
 });
 
-test("Explorer badge setting gates rule badges cleanly", () => {
-  let enabled = true;
-  const uri = { scheme: "file", fsPath: "/workspace/a.txt", toString: () => "file:///workspace/a.txt" };
+test("Explorer badge setting gates rule badges cleanly across modes, legacy fallback, and Git color preservation", () => {
+  const settings = new Map<string, unknown>();
+  const explicitSettings = new Map<string, unknown>();
+  let rules: Array<{ pattern: string; encoding: string }> = [
+    { pattern: "*.txt", encoding: "shiftjis" },
+  ];
+  let matchedIndex = 0;
+  let probeMatchIndex: number | undefined = undefined;
+  const uri = {
+    scheme: "file",
+    fsPath: "/workspace/a.txt",
+    toString: () => "file:///workspace/a.txt",
+  };
   const decorations = loadModule<{
     EncodingDecorationProvider: new () => {
-      provideFileDecoration(value: unknown): { badge: string } | undefined;
+      provideFileDecoration(value: unknown): { badge: string; color?: unknown } | undefined;
     };
   }>("ruleDecorations.ts", {
     vscode: {
@@ -105,21 +115,63 @@ test("Explorer badge setting gates rule badges cleanly", () => {
     "./rules.js": {
       encodingInfo: (id: string) => ({ label: id, badge: "SJ" }),
       findFolderRegistration: () => undefined,
+      findMatchingRule: (_rules: unknown, candidatePath: string) => {
+        if (candidatePath.endsWith("__auto_encoding_probe__") && probeMatchIndex !== undefined) {
+          return { rule: rules[probeMatchIndex]!, index: probeMatchIndex };
+        }
+        return undefined;
+      },
     },
     "./l10n.js": { t: (s: string) => s },
     "./workspaceRules.js": {
       fileUriForResource: (value: unknown) => value,
-      configurationFor: () => ({ get: () => enabled }),
-      resolveRule: () => ({ folder: { name: "workspace" }, rule: { pattern: "*.txt", encoding: "shiftjis" } }),
-      getRules: () => [],
+      configurationFor: () => ({
+        inspect: (key: string) => ({ workspaceValue: explicitSettings.get(key) }),
+        get: (key: string) => settings.get(key),
+      }),
+      resolveRule: () => ({
+        folder: { name: "workspace" },
+        relativePath: "a.txt",
+        rule: rules[matchedIndex]!,
+        index: matchedIndex,
+      }),
+      getRules: () => rules,
       relativePathFor: () => "a.txt",
       notifyConfigurationLimit: () => false,
     },
   });
   const provider = new decorations.EncodingDecorationProvider();
-  assert.equal(provider.provideFileDecoration(uri)?.badge, "SJ");
-  enabled = false;
+
+  // 1. Default ("boundaries"): extension glob (*.txt) differs from parent probe -> badge shown without color override
+  const boundaryDecoration = provider.provideFileDecoration(uri);
+  assert.equal(boundaryDecoration?.badge, "SJ");
+  assert.equal("color" in (boundaryDecoration ?? {}), false);
+
+  // 2. Inherited folder rule (same rule index on parent probe) is hidden in "boundaries" and shown in "all"
+  rules = [{ pattern: "**/*", encoding: "shiftjis" }];
+  matchedIndex = 0;
+  probeMatchIndex = 0;
   assert.equal(provider.provideFileDecoration(uri), undefined);
+  explicitSettings.set("explorerBadges", "all");
+  settings.set("explorerBadges", "all");
+  assert.equal(provider.provideFileDecoration(uri)?.badge, "SJ");
+  assert.equal(provider.provideFileDecoration(uri)?.color, undefined);
+
+  // 3. Explicit "none" hides all badges
+  explicitSettings.set("explorerBadges", "none");
+  settings.set("explorerBadges", "none");
+  probeMatchIndex = undefined;
+  assert.equal(provider.provideFileDecoration(uri), undefined);
+
+  // 4. Legacy showExplorerBadges=false falls back to "none" only when explorerBadges is unset
+  explicitSettings.clear();
+  settings.clear();
+  settings.set("explorerBadges", "boundaries"); // simulated package.json default
+  settings.set("showExplorerBadges", false);
+  assert.equal(provider.provideFileDecoration(uri), undefined);
+
+  explicitSettings.set("explorerBadges", "boundaries");
+  assert.equal(provider.provideFileDecoration(uri)?.badge, "SJ");
 });
 
 test("malformed backup JSON is ignored as an invalid record", async () => {

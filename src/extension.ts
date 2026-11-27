@@ -791,15 +791,20 @@ export function activate(context: vscode.ExtensionContext): void {
       conversionManager.undoLastConversion(),
     ),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
-      if (editor) {
-        void ensureExpectedEncoding(editor.document);
-      } else {
-        const comparisonDoc = activeComparisonDocument();
-        if (comparisonDoc && !comparisonDoc.isClosed) {
-          updateStatus(status, comparisonDoc);
+      try {
+        if (editor) {
+          updateDocumentState(editor.document);
+          void ensureExpectedEncoding(editor.document);
         } else {
-          status.hide();
+          const comparisonDoc = activeComparisonDocument();
+          if (comparisonDoc && !comparisonDoc.isClosed) {
+            updateStatus(status, comparisonDoc);
+          } else {
+            status.hide();
+          }
         }
+      } catch (error) {
+        if (!notifyConfigurationLimit(error)) throw error;
       }
     }),
     ...(vscode.window.onDidChangeVisibleTextEditors
@@ -929,13 +934,24 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration(CONFIGURATION_SECTION)) {
+      if (
+        event.affectsConfiguration(CONFIGURATION_SECTION) ||
+        event.affectsConfiguration("files.encoding")
+      ) {
         clearWorkspaceRuleCache();
         clearEncodingDetectionCache();
         clearCleanFileEncodingInspections();
         clearAutoReopenFailure();
         warned.clear();
         decorationProvider.refresh();
+        const active = vscode.window.activeTextEditor?.document ?? activeComparisonDocument();
+        if (active && !active.isClosed) {
+          try {
+            updateDocumentState(active);
+          } catch (error) {
+            if (!notifyConfigurationLimit(error)) throw error;
+          }
+        }
         (vscode.workspace.textDocuments ?? []).forEach((document) =>
           void ensureExpectedEncoding(document, { forceQueue: true }),
         );

@@ -163,6 +163,7 @@ function testEncode(text: string, encoding: string): Uint8Array {
 interface MockDoc {
   uri: Uri;
   fileName: string;
+  languageId: string;
   encoding: string;
   version: number;
   isDirty: boolean;
@@ -171,6 +172,14 @@ interface MockDoc {
   getText(): string;
   lineAt(): { range: { end: number } };
   offsetAt(position: number): number;
+}
+
+function languageIdForPath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".bat" || ext === ".cmd") return "bat";
+  if (ext === ".md") return "markdown";
+  if (ext === ".java") return "java";
+  return "plaintext";
 }
 
 async function harness(t: TestContext, files: Record<string, Uint8Array>) {
@@ -189,6 +198,8 @@ async function harness(t: TestContext, files: Record<string, Uint8Array>) {
   };
   const folder = { uri: Uri.file(root), name: "workspace", index: 0 };
   const config = new Map<string, unknown>();
+  const filesConfig = new Map<string, unknown>();
+  const filesLanguageConfig = new Map<string, Record<string, unknown>>();
   const state = new Map<string, unknown>();
   const globalState = new Map<string, unknown>();
   const warnings: { message: string; buttons: string[] }[] = [];
@@ -212,10 +223,21 @@ async function harness(t: TestContext, files: Record<string, Uint8Array>) {
 
   const makeDoc = (name: string, encoding = "utf8", initialText?: string, uriOverride?: Uri): MockDoc => {
     const uri = uriOverride ?? Uri.file(path.join(root, name));
-    const currentText = initialText ?? (uri.scheme === "file" ? testDecode(files[name] ?? new Uint8Array(), encoding) : "");
+    const currentText =
+      initialText ??
+      (uri.scheme === "file"
+        ? (() => {
+            try {
+              return testDecode(files[name] ?? new Uint8Array(), encoding);
+            } catch {
+              return "\uFFFD\n";
+            }
+          })()
+        : "");
     const doc: MockDoc = {
       uri,
       fileName: uri.fsPath,
+      languageId: languageIdForPath(uri.fsPath),
       encoding,
       version: 1,
       isDirty: false,
@@ -242,8 +264,21 @@ async function harness(t: TestContext, files: Record<string, Uint8Array>) {
       workspace.workspaceFolders.some((entry) => entry.uri.toString() === folder.uri.toString())
         ? folder
         : undefined,
-    getConfiguration: (section: string) => ({
-      get: (key: string, fallback?: unknown) => section === "files" ? fallback : config.get(key) ?? fallback,
+    getConfiguration: (section: string, scope?: unknown) => ({
+      get: (key: string, fallback?: unknown) => {
+        if (section === "files") {
+          const langId =
+            scope && typeof scope === "object" && "languageId" in scope
+              ? (scope as { languageId?: unknown }).languageId
+              : undefined;
+          if (typeof langId === "string") {
+            const langMap = filesLanguageConfig.get(langId);
+            if (langMap && key in langMap) return langMap[key];
+          }
+          return filesConfig.get(key) ?? fallback;
+        }
+        return config.get(key) ?? fallback;
+      },
       inspect: (key: string) => ({ workspaceFolderValue: config.get(key) }),
     }),
     decode: async (bytes: Uint8Array, opts: { encoding: string }) =>
@@ -435,6 +470,8 @@ async function harness(t: TestContext, files: Record<string, Uint8Array>) {
     files,
     runtime,
     config,
+    filesConfig,
+    filesLanguageConfig,
     state,
     warnings,
     warningResponses,
@@ -794,6 +831,7 @@ test("delayed fileChange after save preserves baseline, avoids duplicate warning
   const hasFffd = await h.openVisible("has-fffd.md", "utf8");
   await h.editDoc(hasFffd, "説明: \uFFFD\n追記: 1\n");
   await h.saveDoc(hasFffd); // fires save + fileChange
+  await h.waitFor(() => h.currentInspection(hasFffd)?.status === "ok", "re-inspected after save");
   assert.equal(h.currentInspection(hasFffd)?.status, "ok");
   assert.equal(h.currentInspection(hasFffd)?.initialHadReplacementCharacter, true);
   assert.equal(h.currentInspection(hasFffd)?.initialReplacementCharacterCount, 1);
@@ -810,15 +848,17 @@ test("delayed fileChange after save preserves baseline, avoids duplicate warning
   assert.equal(h.warnings.length, 1);
   await h.editDoc(watchDoc, "edited");
   await h.saveDoc(watchDoc, SJIS_JA); // mock keeps SJIS bytes on disk -> same warningKey
+  await h.waitFor(() => h.currentInspection(watchDoc)?.status === "detectedMismatch", "re-inspected watch.txt after save");
   assert.equal(h.warnings.length, 1);
   assert.equal(h.currentInspection(watchDoc)?.status, "detectedMismatch");
 
-  // 3. External fileChange fixing disk bytes clears warning/diagnostic and updates status without editor text change
+  // 3. External fileChange fixing disk bytes clears warning/diagnostic and hides status under default "relevant" visibility
   h.files["watch.txt"] = UTF8_CLEAN;
   await writeFile(watchDoc.uri.fsPath, UTF8_CLEAN);
   await h.fireFileChange("watch.txt");
   await h.waitFor(() => h.currentInspection(watchDoc)?.status === "ok" && h.diagnosticsFor("watch.txt").length === 0, "external fix cleared");
-  assert.equal(h.status.text, "$(symbol-text) UTF-8 (no rule)");
+  assert.equal(h.status.visible, false);
+  assert.equal(h.status.backgroundColor, undefined);
 });
 
 test("onDidChangeWorkspaceFolders keeps dirty baselines and re-evaluates open documents", async (t) => {
@@ -1114,6 +1154,7 @@ test("onWillSaveTextDocument matches readResourceBytes byte limit for multibyte 
   const multibyte = new TextEncoder().encode("あ".repeat(400) + "\uFFFD\n"); // 402 chars, > 1024 UTF-8 bytes
   const h = await harness(t, { "multibyte.md": multibyte });
   h.config.set("maxFileSizeKB", 1);
+  h.config.set("statusBarVisibility", "always");
 
   const doc = await h.openVisible("multibyte.md", "utf8", () => h.status.text === "$(symbol-text) UTF-8 (no rule)");
   assert.equal(h.currentInspection(doc), undefined);
@@ -1522,4 +1563,72 @@ test("utf8bom rule keeps 0-byte files compatible while surfacing missing BOM on 
     new Uint8Array(await readFile(reopenedAscii.uri.fsPath)),
     new TextEncoder().encode("hello\n"),
   );
+});
+
+test("statusBarVisibility respects relevant/compact/always, language-scoped files.encoding, manual overrides, and live config updates", async (t) => {
+  const h = await harness(t, {
+    "clean.md": UTF8_CLEAN,
+    "build.bat": SJIS_JA,
+    "utf8-script.bat": UTF8_CLEAN,
+  });
+  h.filesLanguageConfig.set("bat", { encoding: "shiftjis" });
+
+  // 1. Default "relevant" hides clean default UTF-8 files
+  const cleanDoc = await h.openVisible("clean.md", "utf8");
+  assert.equal(h.status.visible, false);
+
+  // 2. Language-scoped [bat] files.encoding="shiftjis" hides clean Shift JIS .bat opened in its language default
+  const batDoc = await h.openVisible("build.bat", "shiftjis");
+  assert.equal(batDoc.encoding, "shiftjis");
+  assert.equal(h.status.visible, false);
+
+  // 3. UTF-8 .bat opened under [bat] files.encoding="shiftjis" auto-reopens as UTF-8 and IS shown in "relevant"
+  const utf8Bat = await h.openVisible(
+    "utf8-script.bat",
+    "shiftjis",
+    (d) => d.encoding === "utf8" && h.status.visible,
+  );
+  assert.equal(utf8Bat.encoding, "utf8");
+  assert.equal(h.status.visible, true);
+  assert.equal(h.status.text, "$(pass) UTF-8 (auto-detected · no rule)");
+
+  // 4. Switching back to clean.md hides status in "relevant", expands to icon in "compact", and shows full label in "always"
+  await h.showExistingInEditor(cleanDoc);
+  assert.equal(h.status.visible, false);
+
+  h.config.set("statusBarVisibility", "compact");
+  await h.fireConfigChange();
+  assert.equal(h.status.visible, true);
+  assert.equal(h.status.text, "$(symbol-text)");
+  assert.match(String(h.status.tooltip), /Current: UTF-8/);
+  assert.equal(h.status.command, "autoEncoding.inspectActiveFile");
+
+  h.config.set("statusBarVisibility", "always");
+  await h.fireConfigChange();
+  assert.equal(h.status.visible, true);
+  assert.equal(h.status.text, "$(symbol-text) UTF-8 (no rule)");
+
+  h.config.set("statusBarVisibility", "relevant");
+  await h.fireConfigChange();
+  assert.equal(h.status.visible, false);
+
+  // 5. Live files.encoding change immediately updates status bar visibility without reopening
+  h.filesConfig.set("encoding", "shiftjis");
+  await h.fireConfigChange("files.encoding");
+  assert.equal(h.status.visible, true);
+  assert.equal(h.status.text, "$(pass) UTF-8 (auto-detected · no rule)");
+
+  h.filesConfig.delete("encoding");
+  await h.fireConfigChange("files.encoding");
+  assert.equal(h.status.visible, false);
+
+  // 6. Manual reopen override on clean.md makes status bar visible even in "relevant"
+  h.picks.push(
+    (items: Record<string, unknown>[]) => items.find((item) => item.action === "choose"),
+    (items: Record<string, unknown>[]) => items.find((item) => item.encoding === "utf8"),
+  );
+  await h.command("inspectActiveFile");
+  await h.waitFor(() => h.status.visible, "manual override surfaces status bar");
+  assert.equal(h.status.visible, true);
+  assert.equal(h.status.text, "$(symbol-text) UTF-8 (no rule)");
 });

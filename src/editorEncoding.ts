@@ -16,7 +16,12 @@ import {
 } from "./scanCore.js";
 import { createWorkspaceCodec } from "./conversionResources.js";
 import { configuredFileSizeLimit } from "./fileLimits.js";
-import { readStableResource, resourceStillMatchesRead } from "./stableResourceRead.js";
+import {
+  readStableResource,
+  resourceStillMatchesRead,
+  statResourceVersion,
+  statTokenFromStableRead,
+} from "./stableResourceRead.js";
 import {
   ENCODINGS,
   ISO2022JP_ENCODING,
@@ -75,7 +80,7 @@ function extractMultiDiffInputs(input: unknown): readonly ComparisonInput[] | un
   return diffs.length > 0 ? diffs : undefined;
 }
 
-type EncodingBasis = "rule" | "ruleFallback" | "openFile" | "detected";
+type EncodingBasis = "rule" | "ruleFallback" | "openFile" | "detected" | "guessed";
 
 interface SideResolution {
   readonly encoding?: string;
@@ -105,15 +110,19 @@ const CACHE_TTL_MS = 60_000;
 
 const byteClassificationCache = new Map<string, {
   readonly fingerprint: string;
+  readonly statToken?: string;
   readonly expiresAt: number;
   readonly classification: EncodingClassification;
   readonly empty: boolean;
   readonly replacementCharacterCount?: number;
+  readonly likelyEncoding?: string;
+  readonly likelyEquivalentEncodings?: readonly string[];
 }>();
 const resolvedSides = new Map<string, { readonly resolution: SideResolution; readonly updatedAt: number }>();
 const inspectedFileDocuments = new Map<string, FileEncodingInspection>();
 const activeInspectionInvalidators = new Map<string, Set<() => void>>();
 const autoDetectedUris = new Map<string, string>();
+const guessedUris = new Map<string, string>();
 const failedAutoReopens = new Map<string, Set<string>>();
 
 function sameEncoding(left?: string, right?: string): boolean {
@@ -404,6 +413,17 @@ function effectiveStatusBarVisibility(uri: vscode.Uri): StatusBarVisibility {
   return "relevant";
 }
 
+function storedOpenEncodingBasis(
+  key: string,
+  encoding: string,
+  fallback: "openFile" | "detected" = "openFile",
+): EncodingBasis {
+  if (manualSides.has(key)) return "openFile";
+  if (sameEncoding(guessedUris.get(key), encoding)) return "guessed";
+  if (sameEncoding(autoDetectedUris.get(key), encoding)) return "detected";
+  return fallback;
+}
+
 function syncPreferredResolution(uri: vscode.Uri, counterpartUri?: vscode.Uri): { encoding: string; basis: EncodingBasis; match?: RuleMatch } | undefined {
   const match = resolveRule(uri);
   if (match) return { encoding: match.rule.encoding, basis: "rule", match };
@@ -422,8 +442,10 @@ function syncPreferredResolution(uri: vscode.Uri, counterpartUri?: vscode.Uri): 
     if (!open || open.uri.scheme !== "file") continue;
     const fallback = effectiveDefaultFilesEncoding(open);
     if (!sameEncoding(open.encoding, fallback)) {
-      const autoDetected = sameEncoding(autoDetectedUris.get(open.uri.toString()), open.encoding);
-      return { encoding: open.encoding, basis: autoDetected ? "detected" : "openFile" };
+      return {
+        encoding: open.encoding,
+        basis: storedOpenEncodingBasis(open.uri.toString(), open.encoding),
+      };
     }
   }
   return undefined;
@@ -437,6 +459,7 @@ function maxResourceBytes(uri: vscode.Uri): number {
 interface ResourceBytes {
   readonly bytes: Uint8Array;
   readonly fingerprint: string;
+  readonly statToken?: string;
   readonly stillCurrent?: () => Promise<boolean>;
 }
 
@@ -450,10 +473,16 @@ async function readResourceBytes(
       if (typeof readStableResource !== "function" || typeof resourceStillMatchesRead !== "function") return undefined;
       const read = await readStableResource(uri, maxSize, isInvalid);
       if (!read) return undefined;
+      const statToken =
+        typeof statTokenFromStableRead === "function" ? statTokenFromStableRead(read) : undefined;
       return {
         bytes: read.bytes,
         fingerprint: `file:${read.localFile?.contentHash ?? `${read.mtime}:${read.size}`}`,
-        stillCurrent: () => resourceStillMatchesRead(uri, maxSize, read, isInvalid),
+        statToken,
+        stillCurrent: () =>
+          statToken && typeof statResourceVersion === "function"
+            ? statResourceVersion(uri, maxSize, isInvalid).then((current) => current === statToken)
+            : resourceStillMatchesRead(uri, maxSize, read, isInvalid),
       };
     }
     if (uri.scheme === "git") {
@@ -486,30 +515,98 @@ async function countReplacementCharactersInBytes(bytes: Uint8Array, encoding: st
   }
 }
 
+async function evaluateLikelyCandidates(
+  bytes: Uint8Array,
+  candidates: readonly string[],
+): Promise<{ likelyEncoding?: string; likelyEquivalentEncodings?: readonly string[] }> {
+  if (candidates.length < 2 || typeof vscode.workspace.decode !== "function") {
+    return {};
+  }
+  const decoded: Array<{ readonly encoding: string; readonly text: string }> = [];
+  for (const candidate of candidates) {
+    if (!isReopenableEncoding(candidate)) continue;
+    const normalized = candidate.toLowerCase();
+    const bomLength =
+      normalized === "utf8bom" &&
+      bytes[0] === 0xef &&
+      bytes[1] === 0xbb &&
+      bytes[2] === 0xbf
+        ? 3
+        : 0;
+    const decodeEncoding = normalized === "utf8bom" ? "utf8" : normalized;
+    try {
+      const text = await vscode.workspace.decode(bytes.subarray(bomLength), {
+        encoding: decodeEncoding,
+      });
+      decoded.push({ encoding: candidate, text });
+    } catch {
+      // Unreadable candidates cannot win natural-text ranking.
+    }
+  }
+  if (decoded.length < 2) return {};
+  const ranked = rankDecodedCandidates(decoded);
+  if (!ranked[0]?.likely) return {};
+  return {
+    likelyEncoding: ranked[0].encoding,
+    likelyEquivalentEncodings: ranked
+      .filter((entry) => entry.equivalentToLikely)
+      .map((entry) => entry.encoding.toLowerCase()),
+  };
+}
+
+type InspectedBytes = {
+  readonly classification: EncodingClassification;
+  readonly empty: boolean;
+  readonly replacementCharacterCount?: number;
+  readonly likelyEncoding?: string;
+  readonly likelyEquivalentEncodings?: readonly string[];
+};
+
 async function inspectUriBytes(
   uri: vscode.Uri,
   expectedEncoding: string,
   isInvalid?: () => boolean,
-): Promise<{ classification: EncodingClassification; empty: boolean; replacementCharacterCount?: number } | undefined> {
+): Promise<InspectedBytes | undefined> {
   if (typeof classifyEncoding !== "function" ||
     typeof vscode.workspace.decode !== "function" ||
     typeof vscode.workspace.encode !== "function") {
     return undefined;
   }
-  const read = await readResourceBytes(uri, maxResourceBytes(uri), isInvalid);
-  if (!read) return undefined;
+  const maxSize = maxResourceBytes(uri);
+  const checkInvalid = isInvalid ?? (() => !!findDocument(uri)?.isDirty);
   const alternativeEncodings = getAutoDetectEncodings(fileUriForResource(uri));
   const cacheKey = `${uri.toString()}::${expectedEncoding}::${alternativeEncodings.join(",")}`;
   const now = Date.now();
   const cached = byteClassificationCache.get(cacheKey);
+  if (
+    cached &&
+    cached.expiresAt > now &&
+    cached.statToken &&
+    uri.scheme === "file" &&
+    typeof statResourceVersion === "function"
+  ) {
+    const currentStat = await statResourceVersion(uri, maxSize, checkInvalid);
+    if (currentStat && currentStat === cached.statToken) {
+      return {
+        classification: cached.classification,
+        empty: cached.empty,
+        replacementCharacterCount: cached.replacementCharacterCount,
+        likelyEncoding: cached.likelyEncoding,
+        likelyEquivalentEncodings: cached.likelyEquivalentEncodings,
+      };
+    }
+  }
+  const read = await readResourceBytes(uri, maxSize, checkInvalid);
+  if (!read) return undefined;
   if (cached && cached.fingerprint === read.fingerprint && cached.expiresAt > now) {
-    return !read.stillCurrent || await read.stillCurrent()
-      ? {
-          classification: cached.classification,
-          empty: cached.empty,
-          replacementCharacterCount: cached.replacementCharacterCount,
-        }
-      : undefined;
+    if (checkInvalid()) return undefined;
+    return {
+      classification: cached.classification,
+      empty: cached.empty,
+      replacementCharacterCount: cached.replacementCharacterCount,
+      likelyEncoding: cached.likelyEncoding,
+      likelyEquivalentEncodings: cached.likelyEquivalentEncodings,
+    };
   }
   try {
     const classification = await classifyEncoding(
@@ -524,16 +621,29 @@ async function inspectUriBytes(
     const replacementCharacterCount = classification.replacementCharacterEncoding
       ? await countReplacementCharactersInBytes(read.bytes, classification.replacementCharacterEncoding)
       : undefined;
-    if (read.stillCurrent && !(await read.stillCurrent())) return undefined;
+    const likelyResult =
+      classification.kind === "ambiguous" && classification.candidates?.length
+        ? await evaluateLikelyCandidates(read.bytes, classification.candidates)
+        : {};
+    if (checkInvalid() || (read.stillCurrent && !(await read.stillCurrent()))) return undefined;
     const empty = read.bytes.byteLength === 0;
     setBounded(byteClassificationCache, cacheKey, {
       fingerprint: read.fingerprint,
+      statToken: read.statToken,
       expiresAt: now + CACHE_TTL_MS,
       classification,
       empty,
       replacementCharacterCount,
+      likelyEncoding: likelyResult.likelyEncoding,
+      likelyEquivalentEncodings: likelyResult.likelyEquivalentEncodings,
     });
-    return { classification, empty, replacementCharacterCount };
+    return {
+      classification,
+      empty,
+      replacementCharacterCount,
+      likelyEncoding: likelyResult.likelyEncoding,
+      likelyEquivalentEncodings: likelyResult.likelyEquivalentEncodings,
+    };
   } catch {
     return undefined;
   }
@@ -572,6 +682,9 @@ async function classifySide(uri: vscode.Uri, counterpartUri?: vscode.Uri): Promi
         encoding: preferred.encoding,
         basis: preferred.basis,
         match: directMatch ?? preferred.match,
+        ...(preferred.basis === "guessed" && classification.kind === "ambiguous"
+          ? { candidates: classification.candidates }
+          : {}),
         ascii: classification.kind === "ascii",
         empty,
       };
@@ -585,6 +698,15 @@ async function classifySide(uri: vscode.Uri, counterpartUri?: vscode.Uri): Promi
       };
     }
     if (classification.kind === "ambiguous") {
+      if ((!directMatch || uri.scheme === "git") && inspected.likelyEncoding) {
+        return {
+          encoding: inspected.likelyEncoding,
+          basis: "guessed",
+          candidates: classification.candidates,
+          match: directMatch ?? preferred.match,
+          actualMismatch: true,
+        };
+      }
       return { candidates: classification.candidates, match: directMatch ?? preferred.match, actualMismatch: true };
     }
     return { encoding: preferred.encoding, basis: preferred.basis, match: directMatch ?? preferred.match };
@@ -593,18 +715,33 @@ async function classifySide(uri: vscode.Uri, counterpartUri?: vscode.Uri): Promi
   if ((classification.kind === "match" || classification.kind === "mismatch") && classification.detectedEncoding) {
     return { encoding: classification.detectedEncoding, basis: "detected" };
   }
-  if (classification.kind === "ambiguous") return { candidates: classification.candidates };
+  if (classification.kind === "ambiguous") {
+    if (inspected.likelyEncoding) {
+      return {
+        encoding: inspected.likelyEncoding,
+        basis: "guessed",
+        candidates: classification.candidates,
+      };
+    }
+    return { candidates: classification.candidates };
+  }
   return {};
 }
 
 function resolveWorkingFileRule(
   match: RuleMatch,
-  inspected: { classification: EncodingClassification; empty: boolean } | undefined,
+  inspected: InspectedBytes | undefined,
 ): SideResolution {
   const encoding = match.rule.encoding;
   const classification = inspected?.classification;
-  if (classification?.kind === "match" ||
-      (classification?.kind === "ascii" && compatibleWithAscii(encoding, inspected?.empty === true))) {
+  const likelyMatchesRule =
+    classification?.kind === "ambiguous" &&
+    inspected?.likelyEquivalentEncodings?.includes(encoding.toLowerCase()) === true;
+  if (
+    classification?.kind === "match" ||
+    likelyMatchesRule ||
+    (classification?.kind === "ascii" && compatibleWithAscii(encoding, inspected?.empty === true))
+  ) {
     return { encoding, basis: "rule", match };
   }
   if (classification?.kind === "mismatch" && classification.detectedEncoding) {
@@ -638,12 +775,6 @@ function replacementCountIfMatched(
   const count = inspected.replacementCharacterCount ?? 1;
   return { has: count > 0, count };
 }
-
-type InspectedBytes = {
-  readonly classification: EncodingClassification;
-  readonly empty: boolean;
-  readonly replacementCharacterCount?: number;
-};
 
 async function evaluateDocumentBytes(
   document: vscode.TextDocument,
@@ -751,11 +882,8 @@ async function evaluateDocumentBytes(
         documentEncoding: docEncoding,
         status: "ok",
         detectedEncoding: docEncoding,
-        basis: isManual
-          ? "openFile"
-          : autoDetectedUris.get(key)?.toLowerCase() === docEncoding
-            ? "detected"
-            : "openFile",
+        candidates: classification.candidates,
+        basis: storedOpenEncodingBasis(key, docEncoding),
         initialHadReplacementCharacter: replacement.has,
         initialReplacementCharacterCount: replacement.count,
       };
@@ -763,6 +891,9 @@ async function evaluateDocumentBytes(
     return {
       documentEncoding: docEncoding,
       status: "candidateMismatch",
+      ...(inspected.likelyEncoding
+        ? { detectedEncoding: inspected.likelyEncoding, basis: "guessed" as const }
+        : {}),
       candidates: classification.candidates,
       initialHadReplacementCharacter: false,
       initialReplacementCharacterCount: 0,
@@ -851,10 +982,13 @@ export async function inspectFileDocument(document: vscode.TextDocument): Promis
     const uniquelyMatchesRule =
       classification.kind === "match" ||
       (classification.kind === "ascii" && compatibleWithAscii(expectedRuleEncoding, empty));
+    const likelyMatchesRule =
+      classification.kind === "ambiguous" &&
+      inspected.likelyEquivalentEncodings?.includes(expectedRuleEncoding) === true;
     const ambiguousIncludesRule =
       classification.kind === "ambiguous" &&
       classification.candidates?.some((c) => c.toLowerCase() === expectedRuleEncoding) === true;
-    if (uniquelyMatchesRule || (docEncoding === expectedRuleEncoding && ambiguousIncludesRule)) {
+    if (uniquelyMatchesRule || likelyMatchesRule || (docEncoding === expectedRuleEncoding && ambiguousIncludesRule)) {
       if (docEncoding === expectedRuleEncoding) {
         const replacement = replacementCountIfMatched(inspected, expectedRuleEncoding);
         return storeFileInspection(key, {
@@ -979,11 +1113,7 @@ export function currentFileInspection(document: vscode.TextDocument): FileEncodi
       documentEncoding: docEncoding,
       ruleConfirmed: currentRule ? currentRule === docEncoding || cached.ruleConfirmed === true : undefined,
       status: "ok",
-      basis: currentRule
-        ? undefined
-        : manualSides.has(key)
-          ? "openFile"
-          : "detected",
+      basis: currentRule ? undefined : storedOpenEncodingBasis(key, docEncoding, "detected"),
       initialHadReplacementCharacter: false,
       initialReplacementCharacterCount: 0,
     };
@@ -1011,18 +1141,41 @@ export async function canReopenWithDetectedEncoding(document: vscode.TextDocumen
   }
   const version = document.version;
   const inspection = await inspectFileDocument(document);
+  const eligibleMismatch =
+    inspection?.status === "detectedMismatch" ||
+    (inspection?.status === "candidateMismatch" && inspection.basis === "guessed");
   return document.version === version && !document.isDirty && !document.isClosed &&
-    !resolveRule(document.uri) && inspection?.status === "detectedMismatch" &&
-    sameEncoding(inspection.detectedEncoding, expectedEncoding);
+    !resolveRule(document.uri) && eligibleMismatch &&
+    sameEncoding(inspection?.detectedEncoding, expectedEncoding);
 }
 
 function reconcileSideWithCounterpart(side: SideResolution, other: SideResolution): SideResolution {
   if (side.keepCurrentEncoding) return side;
-  if (!side.encoding && side.candidates?.length && other.encoding && side.candidates.includes(other.encoding)) {
-    return { ...side, encoding: other.encoding, basis: other.basis ?? "detected", candidates: undefined };
+  const otherEncoding = other.encoding;
+  if (
+    side.basis === "guessed" &&
+    side.candidates?.length &&
+    otherEncoding &&
+    other.basis !== "guessed" &&
+    side.candidates.some((candidate) => sameEncoding(candidate, otherEncoding))
+  ) {
+    return { ...side, encoding: otherEncoding, basis: other.basis ?? "detected", candidates: undefined };
   }
-  if (!side.encoding && side.ascii && other.encoding && canAlignAsciiCounterpart(other.encoding, side.empty === true)) {
-    return { ...side, encoding: other.encoding, basis: other.basis ?? "detected" };
+  if (
+    !side.encoding &&
+    side.candidates?.length &&
+    otherEncoding &&
+    side.candidates.some((candidate) => sameEncoding(candidate, otherEncoding))
+  ) {
+    return {
+      ...side,
+      encoding: otherEncoding,
+      basis: other.basis ?? "detected",
+      candidates: other.basis === "guessed" ? side.candidates : undefined,
+    };
+  }
+  if (!side.encoding && side.ascii && otherEncoding && canAlignAsciiCounterpart(otherEncoding, side.empty === true)) {
+    return { ...side, encoding: otherEncoding, basis: other.basis ?? "detected" };
   }
   return side;
 }
@@ -1350,6 +1503,20 @@ function uniqueCandidates(resolutions: readonly SideResolution[]): string[] {
   return [...new Set(resolutions.flatMap((res) => !res.encoding && res.candidates ? res.candidates : []))];
 }
 
+function inspectableCandidates(
+  resolutions: readonly SideResolution[],
+  fileInspection?: FileEncodingInspection,
+): string[] {
+  const fromSides = resolutions.flatMap((res) =>
+    (!res.encoding || res.basis === "guessed") && res.candidates ? res.candidates : [],
+  );
+  const fromFile =
+    fileInspection?.basis === "guessed" && fileInspection.candidates
+      ? fileInspection.candidates
+      : [];
+  return [...new Set([...fromSides, ...fromFile])];
+}
+
 function candidateTargetsFor(
   comparison: ComparisonInput,
   resolutions: readonly SideResolution[],
@@ -1360,7 +1527,12 @@ function candidateTargetsFor(
     [comparison.modified, resolutions[1]],
   ];
   const direct = pairs
-    .filter(([uri, res]) => isReopenableScheme(uri.scheme) && !res?.encoding && res?.candidates?.includes(candidate) === true)
+    .filter(
+      ([uri, res]) =>
+        isReopenableScheme(uri.scheme) &&
+        (!res?.encoding || res.basis === "guessed") &&
+        res?.candidates?.includes(candidate) === true,
+    )
     .map(([uri]) => uri);
   if (direct.length === 0) return [];
   for (const [uri, res] of pairs) {
@@ -1401,8 +1573,9 @@ function describeBasisTitle(
   mismatched: boolean,
   candidates: readonly string[],
   decodeLoss = false,
+  estimated = false,
 ): string {
-  if (candidates.length > 0) {
+  if (candidates.length > 0 && !estimated) {
     const list = candidates.map((id) => encodingInfo(id).label).join(" / ");
     return match
       ? t("Rule: {0} (mismatch · candidates: {1})", encodingInfo(match.rule.encoding).label, list)
@@ -1417,6 +1590,10 @@ function describeBasisTitle(
     return mismatched
       ? t("Rule: {0} (mismatch)", encodingInfo(match.rule.encoding).label)
       : t("Rule: {0} (matched)", encodingInfo(match.rule.encoding).label);
+  }
+  if (estimated && candidates.length > 0) {
+    const list = candidates.map((id) => encodingInfo(id).label).join(" / ");
+    return t("Estimated from candidates: {0} (no rule)", list);
   }
   if (resolutions.some((res) => res.basis === "openFile")) {
     return t("Inherited from working file (no rule)");
@@ -1466,8 +1643,14 @@ async function buildCandidatePreviews(
   let secondary: readonly RankedEncodingCandidate[] | undefined;
 
   if (comparison) {
-    const rightCandidates = !resolutions[1]?.encoding ? (resolutions[1]?.candidates ?? []) : [];
-    const leftCandidates = !resolutions[0]?.encoding ? (resolutions[0]?.candidates ?? []) : [];
+    const rightCandidates =
+      !resolutions[1]?.encoding || resolutions[1].basis === "guessed"
+        ? (resolutions[1]?.candidates ?? [])
+        : [];
+    const leftCandidates =
+      !resolutions[0]?.encoding || resolutions[0].basis === "guessed"
+        ? (resolutions[0]?.candidates ?? [])
+        : [];
     const rightRanked = rightCandidates.length > 0
       ? await decodeAndRankSideCandidates(comparison.modified, rightCandidates, t("Right"))
       : undefined;
@@ -1567,7 +1750,10 @@ export async function inspectActiveFile(): Promise<void> {
       const expected = resolution?.keepCurrentEncoding ? undefined : (resolution?.encoding ?? match?.rule.encoding);
       return !!expected && isReopenableEncoding(expected) && !sameEncoding(document.encoding, expected);
     })();
-  const candidates = uniqueCandidates(resolutions);
+  const candidates = inspectableCandidates(resolutions, fileInspection);
+  const isEstimated =
+    !mismatched &&
+    (resolutions.some((res) => res.basis === "guessed") || fileInspection?.basis === "guessed");
   const rankedCandidates = await buildCandidatePreviews(document, comparison, resolutions, candidates);
   const orderedCandidates = rankedCandidates?.ordered ?? candidates;
   const ruleMismatch = match
@@ -1579,7 +1765,14 @@ export async function inspectActiveFile(): Promise<void> {
       })
       : !isDocumentEncodingMatch(document, match)
     : false;
-  const ruleText = describeBasisTitle(resolutions, match, mismatched || ruleMismatch, orderedCandidates, decodeLoss);
+  const ruleText = describeBasisTitle(
+    resolutions,
+    match,
+    mismatched || ruleMismatch,
+    orderedCandidates,
+    decodeLoss,
+    isEstimated,
+  );
   const ruleSource = match ? ` | ${t("Source: {0} / {1}", match.folder.name, match.rule.pattern)}` : "";
   const state = comparison
     ? comparisonLabel(comparison)
@@ -1619,11 +1812,20 @@ export async function inspectActiveFile(): Promise<void> {
         : t("Both sides · keep diff view (no save)")
       : t("Display only (no save)");
     const ranked = rankedCandidates?.byEncoding.get(candidate);
+    const isCurrentCandidate = comparison
+      ? targets.length > 0 &&
+        targets.every((targetUri) => sameEncoding(findDocument(targetUri)?.encoding, candidate))
+      : sameEncoding(document.encoding, candidate);
+    const descParts = [
+      ranked?.likely ? t("Likely") : undefined,
+      isCurrentCandidate ? t("Current encoding") : undefined,
+      targetDesc,
+    ].filter((part): part is string => Boolean(part));
     choices.push({
       action: "candidate",
       encoding: candidate,
       label: t("$(sparkle) Candidate: Reopen as {0}", encodingInfo(candidate).label),
-      description: ranked?.likely ? `${t("Likely")} · ${targetDesc}` : targetDesc,
+      description: descParts.join(" · "),
       ...(ranked?.preview ? { detail: ranked.preview } : {}),
     });
   }
@@ -1912,8 +2114,26 @@ export function forgetManualEncoding(uri: vscode.Uri): void {
   const key = uri.toString();
   manualSides.delete(key);
   autoDetectedUris.delete(key);
+  guessedUris.delete(key);
   clearAutoReopenFailure(uri);
   clearEncodingDetectionCache(uri);
+  clearFileEncodingInspection(uri);
+}
+
+/** Disposes per-URI caches and session state for a closed document without touching sibling working-file baselines. */
+export function disposeClosedDocumentState(uri: vscode.Uri): void {
+  const key = uri.toString();
+  manualSides.delete(key);
+  autoDetectedUris.delete(key);
+  guessedUris.delete(key);
+  failedAutoReopens.delete(key);
+  pendingAlignHints.delete(key);
+  resolvedSides.delete(key);
+  for (const cacheKey of [...byteClassificationCache.keys()]) {
+    if (cacheKey.startsWith(`${key}::`)) {
+      byteClassificationCache.delete(cacheKey);
+    }
+  }
   clearFileEncodingInspection(uri);
 }
 
@@ -1946,6 +2166,7 @@ async function reopenComparisonManually(
     if (manual) {
       manualSides.add(key);
       autoDetectedUris.delete(key);
+      guessedUris.delete(key);
     } else {
       manualSides.delete(key);
     }
@@ -1981,8 +2202,16 @@ async function reopenComparisonSides(
       }
       if (!sameEncoding(previous, reopened.encoding)) {
         changed = true;
-        if (basis === "detected" && sameEncoding(reopened.encoding, encoding)) setBounded(autoDetectedUris, key, reopened.encoding);
-        else autoDetectedUris.delete(key);
+        if (basis === "detected" && sameEncoding(reopened.encoding, encoding)) {
+          setBounded(autoDetectedUris, key, reopened.encoding);
+          guessedUris.delete(key);
+        } else if (basis === "guessed" && sameEncoding(reopened.encoding, encoding)) {
+          setBounded(guessedUris, key, reopened.encoding);
+          autoDetectedUris.delete(key);
+        } else {
+          autoDetectedUris.delete(key);
+          guessedUris.delete(key);
+        }
       }
       if (uri.scheme === "file" && !reopened.isClosed && !reopened.isDirty) {
         await inspectFileDocument(reopened);
@@ -2009,8 +2238,16 @@ async function reopenSingleGit(single: ActiveSingleGit, encoding: string, basis?
     const previous = document?.encoding;
     const reopened = await vscode.workspace.openTextDocument(single.uri, { encoding });
     if (sameEncoding(previous, reopened.encoding)) return false;
-    if (basis === "detected" && sameEncoding(reopened.encoding, encoding)) setBounded(autoDetectedUris, key, reopened.encoding);
-    else autoDetectedUris.delete(key);
+    if (basis === "detected" && sameEncoding(reopened.encoding, encoding)) {
+      setBounded(autoDetectedUris, key, reopened.encoding);
+      guessedUris.delete(key);
+    } else if (basis === "guessed" && sameEncoding(reopened.encoding, encoding)) {
+      setBounded(guessedUris, key, reopened.encoding);
+      autoDetectedUris.delete(key);
+    } else {
+      autoDetectedUris.delete(key);
+      guessedUris.delete(key);
+    }
     const current = activeSingleGit();
     if (current && current.uri.toString() === key && typeof vscode.window.showTextDocument === "function") {
       await vscode.window.showTextDocument(reopened, { preview: current.preview, preserveFocus: true });
@@ -2022,6 +2259,7 @@ async function reopenSingleGit(single: ActiveSingleGit, encoding: string, basis?
 export async function autoReopenWithDetectedEncoding(
   document: vscode.TextDocument,
   encoding: string,
+  basis: "detected" | "guessed" = "detected",
 ): Promise<vscode.TextDocument | undefined> {
   if (
     document.isDirty ||
@@ -2055,7 +2293,13 @@ export async function autoReopenWithDetectedEncoding(
     }
     manualSides.delete(key);
     clearAutoReopenFailure(document.uri);
-    setBounded(autoDetectedUris, key, reopened.encoding);
+    if (basis === "guessed") {
+      setBounded(guessedUris, key, reopened.encoding);
+      autoDetectedUris.delete(key);
+    } else {
+      setBounded(autoDetectedUris, key, reopened.encoding);
+      guessedUris.delete(key);
+    }
     clearFileEncodingInspection(document.uri);
     await inspectFileDocument(reopened);
     return reopened;
@@ -2099,9 +2343,11 @@ async function reopenWithEncoding(
   if (!beginOpeningDocument(key)) return undefined;
   const hadManual = manualSides.has(key);
   const previousAutoDetected = autoDetectedUris.get(key);
+  const previousGuessed = guessedUris.get(key);
   if (manual) {
     manualSides.add(key);
     autoDetectedUris.delete(key);
+    guessedUris.delete(key);
   }
   try {
     const reopened = await vscode.workspace.openTextDocument(document.uri, {
@@ -2109,8 +2355,16 @@ async function reopenWithEncoding(
     });
     if (!manual) {
       manualSides.delete(key);
-      if (basis === "detected" && sameEncoding(reopened.encoding, encoding)) setBounded(autoDetectedUris, key, reopened.encoding);
-      else autoDetectedUris.delete(key);
+      if (basis === "detected" && sameEncoding(reopened.encoding, encoding)) {
+        setBounded(autoDetectedUris, key, reopened.encoding);
+        guessedUris.delete(key);
+      } else if (basis === "guessed" && sameEncoding(reopened.encoding, encoding)) {
+        setBounded(guessedUris, key, reopened.encoding);
+        autoDetectedUris.delete(key);
+      } else {
+        autoDetectedUris.delete(key);
+        guessedUris.delete(key);
+      }
     }
     clearAutoReopenFailure(document.uri);
     clearFileEncodingInspection(document.uri);
@@ -2123,12 +2377,66 @@ async function reopenWithEncoding(
     if (manual) {
       if (!hadManual) manualSides.delete(key);
       if (previousAutoDetected !== undefined) setBounded(autoDetectedUris, key, previousAutoDetected);
+      if (previousGuessed !== undefined) setBounded(guessedUris, key, previousGuessed);
     }
     void vscode.window.showErrorMessage(
       t("Failed to reopen with the expected encoding. Please check the file contents and read permissions, then try again."),
     );
     return undefined;
   } finally { endOpeningDocument(key); }
+}
+
+function comparisonStatusSuffix(
+  hasIso2022JpSide: boolean,
+  ruleMatch: RuleMatch | undefined,
+  candidates: readonly string[],
+): string {
+  if (hasIso2022JpSide) return ` (${t("ISO-2022-JP detected")})`;
+  if (!ruleMatch && candidates.length > 0) return ` (${t("candidates")})`;
+  return "";
+}
+
+function comparisonBasisLine(
+  ruleMatch: RuleMatch | undefined,
+  candidates: readonly string[],
+  resolutions: readonly SideResolution[],
+): string {
+  if (ruleMatch) {
+    return t("Encoding rule: {0} ({1})", encodingInfo(ruleMatch.rule.encoding).label, ruleMatch.rule.pattern);
+  }
+  if (candidates.length > 0) {
+    const candidateLabels = candidates.map((id) => encodingInfo(id).label).join(" / ");
+    return t("Encoding rule: none (candidates: {0})", candidateLabels);
+  }
+  if (resolutions.some((res) => res.basis === "openFile")) {
+    return t("Encoding rule: none (inherited from open working file)");
+  }
+  if (resolutions.some((res) => res.basis === "guessed")) {
+    const guessedLabels = [
+      ...new Set(resolutions.flatMap((res) => (res.basis === "guessed" && res.candidates ? res.candidates : []))),
+    ]
+      .map((id) => encodingInfo(id).label)
+      .join(" / ");
+    return t("Encoding rule: none (estimated from candidates: {0})", guessedLabels);
+  }
+  if (resolutions.some((res) => res.basis === "detected")) {
+    return t("Encoding rule: none (auto-detected from bytes)");
+  }
+  return t("Encoding rule: none");
+}
+
+function singleGitBasisLine(res: SideResolution): string {
+  if (res.basis === "openFile") {
+    return t("Displaying Git view using the open working file's encoding (no rule).");
+  }
+  if (res.basis === "guessed") {
+    const labels = (res.candidates ?? []).map((id) => encodingInfo(id).label).join(" / ");
+    return t("Displaying Git view using the most likely encoding estimated from candidates ({0}) (no rule).", labels);
+  }
+  if (res.basis === "detected") {
+    return t("Displaying Git view using the encoding auto-detected from bytes (no rule).");
+  }
+  return t("No encoding rule is configured for this Git file.");
 }
 
 export function updateStatus(status: vscode.StatusBarItem, document: vscode.TextDocument): void {
@@ -2149,29 +2457,10 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
     const unconfirmedWorkingFile = sides.some((side) => side.res.keepCurrentEncoding && side.doc && !side.doc.isDirty);
     const warn = hasIso2022JpSide || candidates.length > 0 || targetMismatch || ruleMismatch || sidesDiffer || unconfirmedWorkingFile;
     const ruleMatch = sides.find((side) => side.directMatch)?.directMatch ?? sides.find((side) => side.res.match)?.res.match;
-    const suffix = hasIso2022JpSide
-      ? ` (${t("ISO-2022-JP detected")})`
-      : !ruleMatch
-        ? candidates.length > 0
-          ? ` (${t("candidates")})`
-          : !warn && sides.some((side) => side.res.basis === "openFile")
-            ? ` (${t("from working file")})`
-            : !warn && sides.some((side) => side.res.basis === "detected" && side.doc && !sameEncoding(side.doc.encoding, effectiveDefaultFilesEncoding(side.doc)))
-              ? ` (${t("auto-detected")})`
-              : ""
-        : "";
-    status.text = `${warn ? "$(warning)" : "$(pass)"} ${comparisonLabel(comparison)}${suffix}`;
+    const suffix = comparisonStatusSuffix(hasIso2022JpSide, ruleMatch, candidates);
+    status.text = `${warn ? "$(warning)" : "$(symbol-text)"} ${comparisonLabel(comparison)}${suffix}`;
     status.backgroundColor = warn ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
-    const candidateLabels = candidates.map((id) => encodingInfo(id).label).join(" / ");
-    const basisLine = ruleMatch
-      ? t("Encoding rule: {0} ({1})", encodingInfo(ruleMatch.rule.encoding).label, ruleMatch.rule.pattern)
-      : candidates.length > 0
-        ? t("Encoding rule: none (candidates: {0})", candidateLabels)
-        : sides.some((side) => side.res.basis === "openFile")
-          ? t("Encoding rule: none (inherited from open working file)")
-          : sides.some((side) => side.res.basis === "detected")
-            ? t("Encoding rule: none (auto-detected from bytes)")
-            : t("Encoding rule: none");
+    const basisLine = comparisonBasisLine(ruleMatch, candidates, sides.map((side) => side.res));
     const stateLine = hasIso2022JpSide
       ? t("One side is ISO-2022-JP (JIS). Because VS Code cannot open it natively, click to convert and save the working file as UTF-8, etc.")
       : candidates.length > 0
@@ -2224,7 +2513,7 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
       const expected = encodingInfo(match.rule.encoding);
       const matches = isDocumentEncodingMatch(document, match);
       status.text = matches
-        ? `$(pass) ${t("Git: {0}", expected.label)}`
+        ? `$(symbol-text) ${t("Git: {0}", expected.label)}`
         : `$(warning) ${t("Git: {0} → {1}", actual, expected.label)}`;
       status.backgroundColor = matches ? undefined : new vscode.ThemeColor("statusBarItem.warningBackground");
       status.tooltip = [
@@ -2249,25 +2538,10 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
       status.show();
       return;
     }
-    const isInherited = res.basis === "openFile";
-    const isDetected =
-      res.basis === "detected" &&
-      (!sameEncoding(document.encoding, effectiveDefaultFilesEncoding(document)) ||
-        autoDetectedUris.has(document.uri.toString()));
-    const basisSuffix = isInherited
-      ? ` (${t("from working file")})`
-      : isDetected
-        ? ` (${t("auto-detected · no rule")})`
-        : ` (${t("no rule")})`;
-    const icon = !isInherited && !isDetected ? "$(symbol-text)" : "$(pass)";
-    status.text = `${icon} ${t("Git: {0}", actual)}${basisSuffix}`;
+    status.text = `$(symbol-text) ${t("Git: {0}", actual)}`;
     status.backgroundColor = undefined;
     status.tooltip = [
-      res.basis === "openFile"
-        ? t("Displaying Git view using the open working file's encoding (no rule).")
-        : res.basis === "detected"
-          ? t("Displaying Git view using the encoding auto-detected from bytes (no rule).")
-          : t("No encoding rule is configured for this Git file."),
+      singleGitBasisLine(res),
       t("Click to reopen with another encoding (no save) or set a file/folder encoding rule."),
     ].join("\n");
     status.show();
@@ -2318,13 +2592,33 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
       return;
     }
     const defaultEncoding = effectiveDefaultFilesEncoding(document);
+    const key = document.uri.toString();
+    const isGuessed =
+      inspection?.status === "ok" &&
+      (inspection.basis === "guessed" || guessedUris.has(key));
+    if (isGuessed) {
+      const candidateLabels = (inspection?.candidates ?? [])
+        .map((id) => encodingInfo(id).label)
+        .join(" / ");
+      status.text = `$(symbol-text) ${actual}`;
+      status.backgroundColor = undefined;
+      status.tooltip = [
+        t(
+          "Displaying using the most likely encoding estimated from candidates ({0}) (no rule).",
+          candidateLabels,
+        ),
+        t("Click to reopen from candidates (no save) or register an encoding rule."),
+        t("Registered rules are also preserved in VS Code Git comparisons."),
+      ].join("\n");
+      status.show();
+      return;
+    }
     if (
       inspection?.status === "ok" &&
       inspection.basis === "detected" &&
-      (!sameEncoding(document.encoding, defaultEncoding) ||
-        autoDetectedUris.has(document.uri.toString()))
+      (!sameEncoding(document.encoding, defaultEncoding) || autoDetectedUris.has(key))
     ) {
-      status.text = `$(pass) ${t("{0} (auto-detected · no rule)", actual)}`;
+      status.text = `$(symbol-text) ${actual}`;
       status.backgroundColor = undefined;
       status.tooltip = [
         t("Displaying using the encoding auto-detected from bytes (no rule)."),
@@ -2356,7 +2650,7 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
       status.show();
       return;
     }
-    status.text = `$(symbol-text) ${t("{0} (no rule)", actual)}`;
+    status.text = `$(symbol-text) ${actual}`;
     status.backgroundColor = undefined;
     status.tooltip = defaultTooltip;
     status.show();
@@ -2456,7 +2750,7 @@ export function updateStatus(status: vscode.StatusBarItem, document: vscode.Text
     return;
   }
   status.text = matches
-    ? `$(pass) ${t("Rule: {0}", expected)}`
+    ? `$(symbol-text) ${expected}`
     : `$(warning) ${t("Open: {0} / Rule: {1}", actual, expected)}`;
   status.backgroundColor = matches
     ? undefined

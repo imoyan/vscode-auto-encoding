@@ -29,6 +29,7 @@ import {
   countReplacementCharacters,
   currentFileInspection,
   diagnosticFor,
+  disposeClosedDocumentState,
   type FileEncodingInspection,
   forgetManualEncoding,
   hasAutoReopenFailed,
@@ -153,6 +154,14 @@ export function activate(context: vscode.ExtensionContext): void {
   }
   const activeDocumentChecks = new Map<string, Promise<void>>();
   const pendingDocumentChecks = new Map<string, QueuedCheck>();
+
+  const cleanupClosedDocument = (uri: vscode.Uri): void => {
+    const key = uri.toString();
+    clearDocumentDiagnostic(uri);
+    pendingDocumentChecks.delete(key);
+    warned.delete(key);
+    disposeClosedDocumentState(uri);
+  };
 
   const runSerializedDocumentCheck = async (
     document: vscode.TextDocument,
@@ -337,6 +346,10 @@ export function activate(context: vscode.ExtensionContext): void {
             console.error("Auto Encoding: Failed to reopen document.");
           } finally {
             reopening.delete(key);
+            const openAfter = findOpenDocument(document.uri);
+            if (!openAfter || openAfter.isClosed) {
+              cleanupClosedDocument(document.uri);
+            }
           }
         }
 
@@ -498,9 +511,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
       const latestFolder = vscode.workspace.getWorkspaceFolder?.(currentDoc.uri);
       const config = configurationFor(latestMatchAfterInspect?.folder ?? latestFolder ?? currentDoc.uri);
+      const canAutoReopenDetected =
+        inspection.status === "detectedMismatch" ||
+        (inspection.status === "candidateMismatch" && inspection.basis === "guessed");
       if (
         !latestMatchAfterInspect &&
-        inspection.status === "detectedMismatch" &&
+        canAutoReopenDetected &&
         inspection.detectedEncoding &&
         isReopenableEncoding(inspection.detectedEncoding) &&
         config.get("autoReopen", true) &&
@@ -512,10 +528,11 @@ export function activate(context: vscode.ExtensionContext): void {
           const reopened = await autoReopenWithDetectedEncoding(
             currentDoc,
             inspection.detectedEncoding,
+            inspection.basis === "guessed" ? "guessed" : "detected",
           );
           if (reopened) {
             if (reopened.isClosed) {
-              clearDocumentDiagnostic(reopened.uri);
+              cleanupClosedDocument(reopened.uri);
               return undefined;
             }
             warned.delete(key);
@@ -526,6 +543,10 @@ export function activate(context: vscode.ExtensionContext): void {
           console.error("Auto Encoding: Failed to reopen document.");
         } finally {
           reopening.delete(key);
+          const openAfter = findOpenDocument(document.uri);
+          if (!openAfter || openAfter.isClosed) {
+            cleanupClosedDocument(document.uri);
+          }
         }
       }
 
@@ -831,11 +852,26 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidCloseTextDocument((document) => {
       const key = document.uri.toString();
       clearDocumentDiagnostic(document.uri);
-      if (reopening.has(key) || isOpeningDocument(document.uri)) {
-        return;
+      if (isOpeningDocument(document.uri)) {
+        void waitForOpeningDocument(document.uri).then(() => {
+          if (reopening.has(key) || isOpeningDocument(document.uri)) return;
+          const openAfter = findOpenDocument(document.uri);
+          if (!openAfter || openAfter.isClosed) {
+            cleanupClosedDocument(document.uri);
+          }
+        });
+      } else if (!reopening.has(key)) {
+        cleanupClosedDocument(document.uri);
       }
-      warned.delete(key);
-      forgetManualEncoding(document.uri);
+      try {
+        const active = vscode.window.activeTextEditor?.document ?? activeComparisonDocument();
+        if (!active || active.isClosed) {
+          status.backgroundColor = undefined;
+          status.hide();
+        }
+      } catch (error) {
+        if (!notifyConfigurationLimit(error)) throw error;
+      }
     }),
     vscode.workspace.onWillSaveTextDocument((event) => {
       try {

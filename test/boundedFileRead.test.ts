@@ -14,6 +14,7 @@ import test, { TestContext } from "node:test";
 import {
   localFileStillMatches,
   readStableLocalFile,
+  statLocalFileVersion,
 } from "../src/boundedFileRead.js";
 
 test("reads a local file within the configured bound", async (context) => {
@@ -103,4 +104,18 @@ test("treats disappearance after reading as an unstable result", async (context)
     return false;
   });
   assert.equal(result, undefined);
+});
+
+test("statLocalFileVersion validates regular file bounds and changes on edit", async (context) => {
+  const dir = temporaryDirectory(context);
+  const file = path.join(dir, "quick.txt");
+  writeFileSync(file, "hello");
+  const token1 = await statLocalFileVersion(file, 1024);
+  assert.equal(typeof token1, "string");
+  assert.equal(await statLocalFileVersion(file, 1024), token1);
+  assert.equal(await statLocalFileVersion(file, 2), undefined);
+
+  writeFileSync(file, "hello world");
+  const token2 = await statLocalFileVersion(file, 1024);
+  assert.notEqual(token2, token1);
 });

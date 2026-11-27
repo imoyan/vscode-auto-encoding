@@ -283,7 +283,7 @@ export async function run(): Promise<void> {
   await waitFor(
     () =>
       statusItems.some(
-        (item) => /Left \(Git\):.*Right \(Working\):/.test(item.text) && item.text.includes("$(pass)"),
+        (item) => /Left \(Git\):.*Right \(Working\):/.test(item.text) && item.text.includes("$(symbol-text)"),
       ),
     () => JSON.stringify(statusItems.map((item) => item.text)),
   );
@@ -433,7 +433,7 @@ export async function run(): Promise<void> {
     () => `単体Git表示が文字化けしています: ${documentOf(deletedHead)?.getText()}`,
   );
   await waitFor(
-    () => statusItems.some((item) => item.text.includes("Git: Shift JIS / CP932 (auto-detected · no rule)")),
+    () => statusItems.some((item) => item.text === "$(symbol-text) Git: Shift JIS / CP932"),
     () => JSON.stringify(statusItems.map((item) => item.text)),
   );
   picks.push(
@@ -557,7 +557,7 @@ export async function run(): Promise<void> {
     () =>
       statusItems.some(
         (item) =>
-          item.text === "$(pass) Rule: Shift JIS / CP932" &&
+          item.text === "$(symbol-text) Shift JIS / CP932" &&
           String(item.tooltip).includes("Source: plain / legacy/**"),
       ),
     () => JSON.stringify(statusItems.map((item) => item.text)),
@@ -622,10 +622,14 @@ export async function run(): Promise<void> {
   );
   await waitFor(
     () =>
-      statusItems.some((item) => item.text === "$(pass) Shift JIS / CP932 (auto-detected · no rule)"),
+      statusItems.some((item) => item.text === "$(symbol-text) Shift JIS / CP932"),
     () => JSON.stringify(statusItems.map((item) => item.text)),
   );
   await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+  await waitFor(
+    () => vscode.window.visibleTextEditors.length === 0,
+    () => "Editors did not close cleanly",
+  );
   await vscode.workspace.fs.delete(unruledAuto);
 
   assert.deepEqual(errors, []);

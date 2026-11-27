@@ -31,6 +31,7 @@ interface Doc { uri: Uri; fileName: string; encoding: string; isDirty: boolean; 
 const SJIS_JA = Uint8Array.from([0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea, 0x0a]);
 const EUC_JA = Uint8Array.from([0xc6, 0xfc, 0xcb, 0xdc, 0xb8, 0xec, 0x0a]);
 const AMBIGUOUS_KANA = Uint8Array.from([0xa4, 0xa2, 0xa4, 0xa4, 0x0a]);
+const TIED_KANJI = Uint8Array.from([0xe0, 0xe8, 0xe0, 0xe8, 0x0a]);
 const UTF8_JA = new TextEncoder().encode("あ\n");
 
 function testDecode(bytes: Uint8Array, encoding: string): string {
@@ -63,11 +64,13 @@ function testEncode(text: string, encoding: string): Uint8Array {
   if (encoding === "shiftjis") {
     if (text === "日本語\n") return SJIS_JA;
     if (text === "､｢､､\n") return AMBIGUOUS_KANA;
+    if (text === "琲琲\n") return TIED_KANJI;
     throw new Error("unrepresentable in shiftjis fixture");
   }
   if (encoding === "eucjp") {
     if (text === "日本語\n") return EUC_JA;
     if (text === "あい\n") return AMBIGUOUS_KANA;
+    if (text === "琥琥\n") return TIED_KANJI;
     throw new Error("unrepresentable in eucjp fixture");
   }
   throw new Error(`unsupported test encoding: ${encoding}`);
@@ -257,13 +260,13 @@ test("the status bar explains matches, mismatches and unconfigured files", async
   assert.match(String(h.status.tooltip), /never modifies files/);
   head.encoding = "shiftjis";
   h.updateStatus(working);
-  assert.match(h.status.text, /^\$\(pass\) /);
+  assert.match(h.status.text, /^\$\(symbol-text\) /);
   assert.equal(h.status.backgroundColor, undefined);
 
   const plain = await harness(t);
   const file = plain.doc(plain.fileUri, "shiftjis");
   plain.updateStatus(file);
-  assert.match(plain.status.text, /Shift JIS \/ CP932 \(no rule\)/);
+  assert.equal(plain.status.text, "$(symbol-text) Shift JIS / CP932");
   assert.match(String(plain.status.tooltip), /preserved in VS Code Git comparisons/);
 });
 
@@ -275,7 +278,7 @@ test("normal editor status distinguishes current decoding from the effective rul
   assert.match(String(h.status.tooltip), /Source: workspace \/ \*\*\/\*\.dat/);
   doc.encoding = "shiftjis";
   h.updateStatus(doc);
-  assert.equal(h.status.text, "$(pass) Rule: Shift JIS / CP932");
+  assert.equal(h.status.text, "$(symbol-text) Shift JIS / CP932");
   assert.match(String(h.status.tooltip), /Open: Shift JIS \/ CP932/);
 });
 
@@ -374,7 +377,10 @@ test("unconfigured working-tree and staged/history comparisons auto-detect unamb
   assert.equal(await working.align(), true);
   assert.deepEqual(working.encodings(), { "gitref=HEAD": "shiftjis", file: "shiftjis" });
   working.updateStatus(workingDoc);
-  assert.match(working.status.text, /^\$\(pass\) Left \(Git\): Shift JIS \/ CP932 \/ Right \(Working\): Shift JIS \/ CP932 \(auto-detected\)$/);
+  assert.equal(
+    working.status.text,
+    "$(symbol-text) Left (Git): Shift JIS / CP932 / Right (Working): Shift JIS / CP932",
+  );
   assert.match(String(working.status.tooltip), /auto-detected from bytes/);
 
   // (2) Staged / commit-to-commit diff (git: vs git:) when working file is not open
@@ -387,7 +393,7 @@ test("unconfigured working-tree and staged/history comparisons auto-detect unamb
   assert.equal(await staged.align(), true);
   assert.deepEqual(staged.encodings(), { "gitref=HEAD": "eucjp", "gitref=~": "eucjp" });
   staged.updateStatus(stagedRight);
-  assert.match(staged.status.text, /^\$\(pass\) Left \(Git\): EUC-JP \/ Right \(Git\): EUC-JP \(auto-detected\)$/);
+  assert.equal(staged.status.text, "$(symbol-text) Left (Git): EUC-JP / Right (Git): EUC-JP");
 });
 
 test("an empty or pure-ASCII comparison side aligns to its unambiguous counterpart", async (t) => {
@@ -400,7 +406,7 @@ test("an empty or pure-ASCII comparison side aligns to its unambiguous counterpa
   assert.equal(await h.align(), true);
   assert.deepEqual(h.encodings(), { "gitref=HEAD": "shiftjis", file: "shiftjis" });
   h.updateStatus(working);
-  assert.match(h.status.text, /^\$\(pass\) /);
+  assert.match(h.status.text, /^\$\(symbol-text\) /);
 });
 
 test("encoding conversion commits keep each side readable instead of forcing mojibake", async (t) => {
@@ -446,11 +452,11 @@ test("a Git counterpart does not choose an encoding for an ambiguous working fil
   assert.match(String(h.status.tooltip), /Multiple encoding candidates/);
 });
 
-test("ambiguous Shift JIS / EUC-JP bytes do not guess blindly unless disambiguated by the other side", async (t) => {
-  // Both sides ambiguous -> keep UTF-8, warn with candidates, allow 1-click candidate reopen from menu top
+test("ambiguous comparisons align when likely or disambiguated by counterpart while keeping close ties conservative", async (t) => {
+  // 1. Close tie (TIED_KANJI) on both sides -> keep UTF-8, warn with candidates, allow 1-click candidate reopen from menu top
   const both = await harness(t);
-  await writeFile(both.filePath, AMBIGUOUS_KANA);
-  both.gitBlobs.set(both.headUri.toString(), AMBIGUOUS_KANA);
+  await writeFile(both.filePath, TIED_KANJI);
+  both.gitBlobs.set(both.headUri.toString(), TIED_KANJI);
   both.doc(both.headUri);
   const working = both.doc(both.fileUri);
   both.show(both.headUri, both.fileUri);
@@ -461,28 +467,41 @@ test("ambiguous Shift JIS / EUC-JP bytes do not guess blindly unless disambiguat
   assert.match(String(both.status.tooltip), /candidates: Shift JIS \/ CP932 \/ EUC-JP/);
   both.picks.push((items: Record<string, unknown>[]) => {
     assert.equal(items[0]?.action, "candidate");
-    assert.equal(items[0]?.encoding, "eucjp");
-    assert.match(String(items[0]?.description), /^Likely · Both sides/);
+    assert.match(String(items[0]?.description), /^Both sides/);
     assert.match(String(items[0]?.detail), /^Right L1: /);
     return items.find((item) => item.action === "candidate" && item.encoding === "eucjp");
   });
   await both.inspect();
   assert.deepEqual(both.encodings(), { "gitref=HEAD": "eucjp", file: "eucjp" });
 
-  // Counterpart is unambiguous EUC-JP -> resolves ambiguous side automatically
-  const resolved = await harness(t);
-  await writeFile(resolved.filePath, EUC_JA);
-  resolved.gitBlobs.set(resolved.headUri.toString(), AMBIGUOUS_KANA);
-  resolved.doc(resolved.headUri);
-  resolved.doc(resolved.fileUri);
-  resolved.show(resolved.headUri, resolved.fileUri);
-  assert.equal(await resolved.align(), true);
-  assert.deepEqual(resolved.encodings(), { "gitref=HEAD": "eucjp", file: "eucjp" });
+  // 2. Overwhelmingly likely (AMBIGUOUS_KANA -> EUC-JP) aligns both sides automatically and keeps candidates in QuickPick
+  const likelyDiff = await harness(t);
+  await writeFile(likelyDiff.filePath, AMBIGUOUS_KANA);
+  likelyDiff.gitBlobs.set(likelyDiff.headUri.toString(), AMBIGUOUS_KANA);
+  likelyDiff.doc(likelyDiff.headUri);
+  const likelyWork = likelyDiff.doc(likelyDiff.fileUri);
+  likelyDiff.show(likelyDiff.headUri, likelyDiff.fileUri);
+  assert.equal(await likelyDiff.align(), true);
+  assert.deepEqual(likelyDiff.encodings(), { "gitref=HEAD": "eucjp", file: "eucjp" });
+  likelyDiff.updateStatus(likelyWork);
+  assert.equal(likelyDiff.status.text, "$(symbol-text) Left (Git): EUC-JP / Right (Working): EUC-JP");
+  assert.equal(likelyDiff.status.backgroundColor, undefined);
+  assert.match(String(likelyDiff.status.tooltip), /estimated from candidates/);
 
-  // Counterpart is uniquely UTF-8 while Git side is ambiguous -> picking EUC-JP candidate reopens ONLY the ambiguous Git side
+  // 3. Unambiguous counterpart (HEAD = SJIS_JA) wins over statistical guess on shortened working side (AMBIGUOUS_KANA)
+  const hardWins = await harness(t);
+  await writeFile(hardWins.filePath, AMBIGUOUS_KANA);
+  hardWins.gitBlobs.set(hardWins.headUri.toString(), SJIS_JA);
+  hardWins.doc(hardWins.headUri);
+  hardWins.doc(hardWins.fileUri);
+  hardWins.show(hardWins.headUri, hardWins.fileUri);
+  assert.equal(await hardWins.align(), true);
+  assert.deepEqual(hardWins.encodings(), { "gitref=HEAD": "shiftjis", file: "shiftjis" });
+
+  // 4. Counterpart is uniquely UTF-8 while Git side is tied -> picking EUC-JP candidate reopens ONLY the ambiguous Git side
   const mixed = await harness(t);
   await writeFile(mixed.filePath, UTF8_JA);
-  mixed.gitBlobs.set(mixed.headUri.toString(), AMBIGUOUS_KANA);
+  mixed.gitBlobs.set(mixed.headUri.toString(), TIED_KANJI);
   mixed.doc(mixed.headUri, "utf8");
   const mixedWork = mixed.doc(mixed.fileUri, "utf8");
   mixed.show(mixed.headUri, mixed.fileUri);
@@ -492,7 +511,7 @@ test("ambiguous Shift JIS / EUC-JP bytes do not guess blindly unless disambiguat
   mixed.picks.push((items: Record<string, unknown>[]) => {
     assert.equal(items.some((item) => item.action === "convertRule" || item.action === "convertFile"), false);
     const candidate = items.find((item) => item.action === "candidate" && item.encoding === "eucjp");
-    assert.match(String(candidate?.description), /^Likely · Left side \(Git\) only/);
+    assert.match(String(candidate?.description), /^Left side \(Git\) only/);
     assert.match(String(candidate?.detail), /^Left L1: /);
     return candidate;
   });
@@ -527,7 +546,7 @@ test("single-side Git views (such as deleted files) auto-detect encoding and all
   assert.equal(h.shownDocs.length, 1);
   assert.equal(JSON.stringify(h.shownDocs[0]!.options), JSON.stringify({ preview: true, preserveFocus: true }));
   h.updateStatus(gitDoc);
-  assert.equal(h.status.text, "$(pass) Git: Shift JIS / CP932 (auto-detected · no rule)");
+  assert.equal(h.status.text, "$(symbol-text) Git: Shift JIS / CP932");
 
   // Registering a file rule from a deleted Git document passes the git: URI so missing disk files do not fail
   h.hooks.command = (args) => {
@@ -542,7 +561,7 @@ test("single-side Git views (such as deleted files) auto-detect encoding and all
   await h.inspect();
   assert.equal(h.commands.at(-1)?.[0], "autoEncoding.configureFile");
   h.updateStatus(gitDoc);
-  assert.equal(h.status.text, "$(pass) Git: Shift JIS / CP932");
+  assert.equal(h.status.text, "$(symbol-text) Git: Shift JIS / CP932");
 });
 
 test("rename comparisons inherit open working file encoding or rule fallback across paths", async (t) => {

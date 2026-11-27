@@ -83,9 +83,16 @@ class Diagnostic {
 }
 
 const SJIS_JA = Uint8Array.from([0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea, 0x0a]);
+const SJIS_GREETING = Uint8Array.from([
+  0x82, 0xb1, 0x82, 0xf1, 0x82, 0xc9, 0x82, 0xbf, 0x82, 0xcd, 0x90, 0xa2, 0x8a, 0x45, 0x0a,
+]); // "こんにちは世界\n" in Shift JIS (also lossless 2-byte GBK in gb18030)
 const EUC_JA = Uint8Array.from([0xc6, 0xfc, 0xcb, 0xdc, 0xb8, 0xec, 0x0a]);
 const AMBIGUOUS_KANA = Uint8Array.from([0xa4, 0xa2, 0xa4, 0xa4, 0x0a]);
+const TIED_KANJI = Uint8Array.from([0xe0, 0xe8, 0xe0, 0xe8, 0x0a]);
 const WIN1252_CAFE = Uint8Array.from([0x63, 0x61, 0x66, 0xe9, 0x0a]);
+const WIN1252_FRENCH = Uint8Array.from([
+  0x63, 0x61, 0x66, 0xe9, 0x20, 0x6e, 0x61, 0xef, 0x76, 0x65, 0x0a,
+]);
 const UNIDENTIFIABLE_LOSS = Uint8Array.from([0x63, 0x61, 0x66, 0x81, 0x0a]);
 const GB18030_ONLY = Uint8Array.from([0x81, 0x30, 0x89, 0x38, 0x0a]);
 const ISO2022JP_JA = Uint8Array.from([
@@ -135,6 +142,7 @@ function testEncode(text: string, encoding: string): Uint8Array {
   if (Array.from(text).every((ch) => ch.charCodeAt(0) < 0x80)) return new TextEncoder().encode(text);
   if (encoding === "shiftjis") {
     if (text === "日本語\n") return SJIS_JA;
+    if (text === "こんにちは世界\n") return SJIS_GREETING;
     if (text === "説明: ok\n") return SJIS_JA_ASCII_OK;
     if (text === "､｢､､\n") return AMBIGUOUS_KANA;
     if (text === "// ASCII header line 1\n// ASCII header line 2\n､｢､､\n") {
@@ -142,6 +150,7 @@ function testEncode(text: string, encoding: string): Uint8Array {
     }
     if (text === "濛\n") return WIN1252_AA;
     if (text === "琲\n") return WIN1252_AE;
+    if (text === "琲琲\n") return TIED_KANJI;
     throw new Error("unrepresentable in shiftjis fixture");
   }
   if (encoding === "eucjp") {
@@ -151,10 +160,12 @@ function testEncode(text: string, encoding: string): Uint8Array {
       return Uint8Array.from([...new TextEncoder().encode("// ASCII header line 1\n// ASCII header line 2\n"), ...AMBIGUOUS_KANA]);
     }
     if (text === "琥\n") return WIN1252_AE;
+    if (text === "琥琥\n") return TIED_KANJI;
     throw new Error("unrepresentable in eucjp fixture");
   }
   if (encoding === "gb18030") {
     if (text === new TextDecoder("gb18030", { fatal: true }).decode(GB18030_ONLY)) return GB18030_ONLY;
+    if (text === new TextDecoder("gb18030", { fatal: true }).decode(SJIS_GREETING)) return SJIS_GREETING;
     throw new Error("unrepresentable in gb18030 fixture");
   }
   throw new Error(`unsupported test encoding: ${encoding}`);
@@ -603,7 +614,7 @@ test("when autoReopen=false, unconfigured unambiguous Shift JIS shows warning, d
   assert.deepEqual(h.warnings[0]!.buttons, ["Reopen as Shift JIS / CP932"]);
   assert.match(h.warnings[0]!.message, /legacy\.txt.*UTF-8.*Shift JIS \/ CP932/);
   assert.equal(doc.encoding, "shiftjis");
-  assert.equal(h.status.text, "$(pass) Shift JIS / CP932 (auto-detected · no rule)");
+  assert.equal(h.status.text, "$(symbol-text) Shift JIS / CP932");
   assert.equal(h.status.backgroundColor, undefined);
   assert.deepEqual(h.diagnosticsFor("legacy.txt"), []);
 
@@ -618,24 +629,50 @@ test("when autoReopen=false, unconfigured unambiguous Shift JIS shows warning, d
   assert.match(h2.diagnosticsFor("legacy2.txt")[0]!.message, /Shift JIS \/ CP932/);
 });
 
-test("default autoReopen=true reopens unambiguous unconfigured files silently without guessing ambiguous candidates", async (t) => {
-  const h = await harness(t, { "sjis.txt": SJIS_JA, "ambiguous.txt": AMBIGUOUS_KANA });
+test("default autoReopen=true reopens unambiguous and clearly likely files while keeping close ties conservative", async (t) => {
+  const h = await harness(t, {
+    "sjis.txt": SJIS_JA,
+    "likely-euc.txt": AMBIGUOUS_KANA,
+    "tied.txt": TIED_KANJI,
+  });
 
-  const sjis = await h.openVisible("sjis.txt", "utf8", (d) => d.encoding === "shiftjis" && h.status.text === "$(pass) Shift JIS / CP932 (auto-detected · no rule)" && h.status.backgroundColor === undefined);
+  const sjis = await h.openVisible(
+    "sjis.txt",
+    "utf8",
+    (d) => d.encoding === "shiftjis" && h.status.text === "$(symbol-text) Shift JIS / CP932" && h.status.backgroundColor === undefined,
+  );
   assert.equal(sjis.encoding, "shiftjis");
   assert.equal(h.warnings.length, 0);
-  assert.equal(h.status.text, "$(pass) Shift JIS / CP932 (auto-detected · no rule)");
+  assert.equal(h.status.text, "$(symbol-text) Shift JIS / CP932");
 
-  const ambiguous = await h.openVisible("ambiguous.txt", "utf8", () => h.status.text === "$(warning) Open: UTF-8 (candidates · no rule)");
+  // Overwhelming natural-text margin (あいう vs halfwidth katakana punct) auto-reopens cleanly and keeps 1-click manual switch
+  const likelyEuc = await h.openVisible(
+    "likely-euc.txt",
+    "utf8",
+    (d) => d.encoding === "eucjp" && h.status.text === "$(symbol-text) EUC-JP" && h.status.backgroundColor === undefined,
+  );
+  assert.equal(likelyEuc.encoding, "eucjp");
   assert.equal(h.warnings.length, 0);
-  assert.equal(ambiguous.encoding, "utf8");
-  assert.equal(h.diagnosticsFor("ambiguous.txt").length, 1);
+  assert.deepEqual(h.diagnosticsFor("likely-euc.txt"), []);
+
+  h.picks.push((items: Record<string, unknown>[]) =>
+    items.find((item) => item.action === "candidate" && item.encoding === "shiftjis"),
+  );
+  await h.command("inspectActiveFile");
+  await h.waitFor(() => likelyEuc.encoding === "shiftjis", "switched estimated file manually via 1-click candidate");
+  assert.equal(likelyEuc.encoding, "shiftjis");
+
+  // Genuine tie (琲琲 vs 琥琥) does NOT guess — surfaces candidate warning for 1-click selection
+  const tied = await h.openVisible("tied.txt", "utf8", () => h.status.text === "$(warning) Open: UTF-8 (candidates · no rule)");
+  assert.equal(h.warnings.length, 0);
+  assert.equal(tied.encoding, "utf8");
+  assert.equal(h.diagnosticsFor("tied.txt").length, 1);
 
   h.picks.push((items: Record<string, unknown>[]) => items.find((item) => item.action === "candidate" && item.encoding === "eucjp"));
   await h.command("inspectActiveFile");
-  await h.waitFor(() => ambiguous.encoding === "eucjp" && h.diagnosticsFor("ambiguous.txt").length === 0, "reopened ambiguous via status bar");
-  assert.equal(ambiguous.encoding, "eucjp");
-  assert.deepEqual(h.diagnosticsFor("ambiguous.txt"), []);
+  await h.waitFor(() => tied.encoding === "eucjp" && h.diagnosticsFor("tied.txt").length === 0, "reopened tied file via status bar");
+  assert.equal(tied.encoding, "eucjp");
+  assert.deepEqual(h.diagnosticsFor("tied.txt"), []);
 });
 
 test("unidentifiable decode loss (opt-in GB18030 opened as UTF-8) warns and clears after reopening as GB18030", async (t) => {
@@ -1124,7 +1161,7 @@ test("warnOnOpen=false suppresses open toasts while keeping status/diagnostics, 
 
 test("unresolved candidateMismatch (unruled and ruled) stays quiet without toast while keeping status/diagnostics, and ruled decodeLoss keeps 1-button prompt", async (t) => {
   const h = await harness(t, {
-    "unruled-ambig.txt": AMBIGUOUS_KANA,
+    "unruled-ambig.txt": TIED_KANJI,
     "ruled-ambig.txt": AMBIGUOUS_KANA,
     "ruled-loss.txt": UNIDENTIFIABLE_LOSS,
   });
@@ -1156,7 +1193,7 @@ test("onWillSaveTextDocument matches readResourceBytes byte limit for multibyte 
   h.config.set("maxFileSizeKB", 1);
   h.config.set("statusBarVisibility", "always");
 
-  const doc = await h.openVisible("multibyte.md", "utf8", () => h.status.text === "$(symbol-text) UTF-8 (no rule)");
+  const doc = await h.openVisible("multibyte.md", "utf8", () => h.status.text === "$(symbol-text) UTF-8");
   assert.equal(h.currentInspection(doc), undefined);
 
   await h.editDoc(doc, "あ".repeat(400) + "\uFFFD\n");
@@ -1243,7 +1280,7 @@ test("ruled ambiguous Shift JIS / EUC-JP file keeps candidates on UTF-8 open and
     return items.find((item) => item.action === "candidate" && item.encoding === "shiftjis");
   });
   await h.command("inspectActiveFile");
-  await h.waitFor(() => doc.encoding === "shiftjis" && h.status.text === "$(pass) Rule: Shift JIS / CP932", "reopened as ruled shiftjis");
+  await h.waitFor(() => doc.encoding === "shiftjis" && h.status.text === "$(symbol-text) Shift JIS / CP932", "reopened as ruled shiftjis");
   assert.deepEqual(h.diagnosticsFor("ambig.dat"), []);
   assert.equal(h.runtime.isManualEncodingOverride(doc.uri as unknown as import("vscode").Uri), false);
 });
@@ -1408,7 +1445,7 @@ test("status bar inspectActiveFile exposes rule shortcut and file conversion onl
   h.warningResponses.push("Convert");
   await h.command("inspectActiveFile");
   await h.waitFor(
-    () => mismatchDoc.encoding === "shiftjis" && h.status.text === "$(pass) Rule: Shift JIS / CP932",
+    () => mismatchDoc.encoding === "shiftjis" && h.status.text === "$(symbol-text) Shift JIS / CP932",
     "converted via inspectActiveFile convertRule shortcut",
   );
   assert.deepEqual(new Uint8Array(await readFile(mismatchDoc.uri.fsPath)), SJIS_JA_ASCII_OK);
@@ -1441,6 +1478,7 @@ test("inspectActiveFile ranks ambiguous candidates with non-ASCII line previews 
     ...AMBIGUOUS_KANA,
   ]);
   const h = await harness(t, { "header-ambig.txt": withHeader });
+  h.config.set("autoReopen", false);
   await h.openVisible("header-ambig.txt", "utf8", () => h.status.text === "$(warning) Open: UTF-8 (candidates · no rule)");
   assert.equal(h.warnings.length, 0);
 
@@ -1456,6 +1494,19 @@ test("inspectActiveFile ranks ambiguous candidates with non-ASCII line previews 
     return undefined;
   });
   await h.command("inspectActiveFile");
+
+  // With autoReopen=true, QuickPick still shows all ranked candidates with Current encoding marked
+  h.config.set("autoReopen", true);
+  await h.fireConfigChange();
+  await h.waitFor(() => h.status.text === "$(symbol-text) EUC-JP", "auto-reopened as eucjp");
+  h.picks.push((items: Record<string, unknown>[]) => {
+    assert.equal(items[0]?.encoding, "eucjp");
+    assert.equal(items[0]?.description, "Likely · Current encoding · Display only (no save)");
+    assert.equal(items[1]?.encoding, "shiftjis");
+    assert.equal(items[1]?.description, "Display only (no save)");
+    return undefined;
+  });
+  await h.command("inspectActiveFile");
 });
 
 test("outside-workspace local files auto-reopen and show status without emitting workspace diagnostics", async (t) => {
@@ -1468,7 +1519,7 @@ test("outside-workspace local files auto-reopen and show status without emitting
   const doc = await h.openVisible(
     "external-sjis.txt",
     "utf8",
-    () => h.status.text === "$(pass) Shift JIS / CP932 (auto-detected · no rule)",
+    () => h.status.text === "$(symbol-text) Shift JIS / CP932",
   );
   assert.equal(doc.encoding, "shiftjis");
   assert.deepEqual(h.diagnosticsFor("external-sjis.txt"), []);
@@ -1522,7 +1573,7 @@ test("utf8bom rule keeps 0-byte files compatible while surfacing missing BOM on 
   const emptyDoc = await h.openVisible(
     "empty.txt",
     "utf8",
-    (d) => d.encoding === "utf8bom" && h.status.text === "$(pass) Rule: UTF-8 with BOM",
+    (d) => d.encoding === "utf8bom" && h.status.text === "$(symbol-text) UTF-8 with BOM",
   );
   assert.equal(emptyDoc.encoding, "utf8bom");
   assert.deepEqual(h.diagnosticsFor("empty.txt"), []);
@@ -1549,7 +1600,7 @@ test("utf8bom rule keeps 0-byte files compatible while surfacing missing BOM on 
   const reopenedAscii = await h.openVisible(
     "ascii-no-bom.txt",
     "utf8",
-    (d) => d.encoding === "utf8bom" && h.status.text === "$(pass) Rule: UTF-8 with BOM",
+    (d) => d.encoding === "utf8bom" && h.status.text === "$(symbol-text) UTF-8 with BOM",
   );
   assert.deepEqual(
     new Uint8Array(await readFile(reopenedAscii.uri.fsPath)),
@@ -1590,7 +1641,7 @@ test("statusBarVisibility respects relevant/compact/always, language-scoped file
   );
   assert.equal(utf8Bat.encoding, "utf8");
   assert.equal(h.status.visible, true);
-  assert.equal(h.status.text, "$(pass) UTF-8 (auto-detected · no rule)");
+  assert.equal(h.status.text, "$(symbol-text) UTF-8");
 
   // 4. Switching back to clean.md hides status in "relevant", expands to icon in "compact", and shows full label in "always"
   await h.showExistingInEditor(cleanDoc);
@@ -1606,7 +1657,7 @@ test("statusBarVisibility respects relevant/compact/always, language-scoped file
   h.config.set("statusBarVisibility", "always");
   await h.fireConfigChange();
   assert.equal(h.status.visible, true);
-  assert.equal(h.status.text, "$(symbol-text) UTF-8 (no rule)");
+  assert.equal(h.status.text, "$(symbol-text) UTF-8");
 
   h.config.set("statusBarVisibility", "relevant");
   await h.fireConfigChange();
@@ -1616,7 +1667,7 @@ test("statusBarVisibility respects relevant/compact/always, language-scoped file
   h.filesConfig.set("encoding", "shiftjis");
   await h.fireConfigChange("files.encoding");
   assert.equal(h.status.visible, true);
-  assert.equal(h.status.text, "$(pass) UTF-8 (auto-detected · no rule)");
+  assert.equal(h.status.text, "$(symbol-text) UTF-8");
 
   h.filesConfig.delete("encoding");
   await h.fireConfigChange("files.encoding");
@@ -1630,5 +1681,46 @@ test("statusBarVisibility respects relevant/compact/always, language-scoped file
   await h.command("inspectActiveFile");
   await h.waitFor(() => h.status.visible, "manual override surfaces status bar");
   assert.equal(h.status.visible, true);
-  assert.equal(h.status.text, "$(symbol-text) UTF-8 (no rule)");
+  assert.equal(h.status.text, "$(symbol-text) UTF-8");
+});
+
+test("likely CJK rule confirmation with gb18030 enabled, identical-text Western auto-reopen, and clean close disposal", async (t) => {
+  const h = await harness(t, {
+    "legacy/ruled.txt": SJIS_GREETING,
+    "french.txt": WIN1252_FRENCH,
+  });
+  h.config.set("autoDetectEncodings", ["shiftjis", "eucjp", "gb18030"]);
+  h.config.set("rules", [{ pattern: "legacy/**", encoding: "shiftjis" }]);
+
+  // 1. Even with gb18030 enabled (causing SJIS_JA to round-trip in both shiftjis and gb18030), shiftjis wins CJK scoring and confirms the rule
+  const ruledDoc = await h.openVisible(
+    "legacy/ruled.txt",
+    "utf8",
+    (d) => d.encoding === "shiftjis" && h.status.text === "$(symbol-text) Shift JIS / CP932",
+  );
+  assert.equal(ruledDoc.encoding, "shiftjis");
+  assert.equal(h.warnings.length, 0);
+  assert.deepEqual(h.diagnosticsFor("legacy/ruled.txt"), []);
+  await h.closeDoc(ruledDoc);
+  assert.equal(h.status.visible, false);
+  assert.equal(h.currentInspection(ruledDoc), undefined);
+
+  // 2. Identical-text 2-word Western file ("café naïve\n") auto-reopens cleanly as Windows-1252 and cleans up on close
+  h.config.set("autoDetectEncodings", ["shiftjis", "eucjp"]);
+  await h.fireConfigChange();
+  const frenchDoc = await h.openVisible(
+    "french.txt",
+    "utf8",
+    (d) => d.encoding === "windows1252" && h.status.visible,
+  );
+  assert.equal(frenchDoc.encoding, "windows1252");
+  assert.equal(h.status.text, "$(symbol-text) Windows-1252");
+  assert.deepEqual(h.diagnosticsFor("french.txt"), []);
+  await h.editDoc(frenchDoc, "café naïve!\n");
+  await h.saveDoc(frenchDoc);
+  assert.deepEqual(h.errors, []);
+
+  await h.closeDoc(frenchDoc);
+  assert.equal(h.status.visible, false);
+  assert.equal(h.currentInspection(frenchDoc), undefined);
 });

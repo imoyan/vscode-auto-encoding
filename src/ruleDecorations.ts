@@ -15,19 +15,9 @@ import {
 export type ExplorerBadgesMode = "boundaries" | "all" | "none";
 
 function effectiveExplorerBadgesMode(folderUri: vscode.Uri): ExplorerBadgesMode {
-  const config = configurationFor(folderUri);
-  const inspected = config.inspect?.<unknown>("explorerBadges");
-  const explicit =
-    inspected?.workspaceFolderValue ?? inspected?.workspaceValue ?? inspected?.globalValue;
-  if (explicit === "boundaries" || explicit === "all" || explicit === "none") {
-    return explicit;
-  }
-  const configured = config.get<unknown>("explorerBadges");
-  if (configured === "all" || configured === "none") {
+  const configured = configurationFor(folderUri).get<unknown>("explorerBadges", "boundaries");
+  if (configured === "boundaries" || configured === "all" || configured === "none") {
     return configured;
-  }
-  if (config.get<unknown>("showExplorerBadges") === false) {
-    return "none";
   }
   return "boundaries";
 }

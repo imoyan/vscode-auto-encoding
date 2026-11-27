@@ -41,9 +41,6 @@ export function validStoredConversionSizes(
   originalSize: unknown,
   convertedSize: unknown,
 ): boolean {
-  if (originalSize === undefined && convertedSize === undefined) {
-    return true;
-  }
   return (
     Number.isSafeInteger(originalSize) &&
     (originalSize as number) >= 0 &&
@@ -60,13 +57,10 @@ export interface EncodingCodec {
 }
 
 export function conversionBackupReadLimit(
-  originalSize: number | undefined,
-  convertedSize: number | undefined,
-  legacyLimit: number,
+  originalSize: number,
+  convertedSize: number,
 ): number {
-  return originalSize !== undefined && convertedSize !== undefined
-    ? Math.max(originalSize, convertedSize)
-    : legacyLimit;
+  return Math.max(originalSize, convertedSize);
 }
 
 export interface ConversionWriteSteps {

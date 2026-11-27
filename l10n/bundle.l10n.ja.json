@@ -300,5 +300,9 @@
   "Open: {0} / Detected: {1} (convertible)": "読み込み: {0} / 判定: {1}（変換可）",
   "Saved bytes are {0}, which VS Code cannot open natively.": "保存済みの内容は {0} です。VS Code 標準では直接開けません。",
   "Click to convert and save as UTF-8, Shift JIS, etc. with a local backup.": "クリックすると、UTF-8 や Shift JIS 等へバックアップ付きで変換して保存できます。",
-  "Saved bytes are {0}, which VS Code cannot open natively. Click to convert and save as UTF-8, etc.": "保存済みの内容は {0} です。VS Code 標準では直接開けないため、クリックして UTF-8 等へ変換して保存できます。"
+  "Saved bytes are {0}, which VS Code cannot open natively. Click to convert and save as UTF-8, etc.": "保存済みの内容は {0} です。VS Code 標準では直接開けないため、クリックして UTF-8 等へ変換して保存できます。",
+  "Estimated from candidates: {0} (no rule)": "候補から推定: {0}（ルール未設定）",
+  "Encoding rule: none (estimated from candidates: {0})": "文字コード設定: 未設定（候補から推定: {0}）",
+  "Displaying Git view using the most likely encoding estimated from candidates ({0}) (no rule).": "複数の文字コード候補（{0}）から最も自然な文字コードでGit版を表示しています（ルール未設定）。",
+  "Displaying using the most likely encoding estimated from candidates ({0}) (no rule).": "複数の文字コード候補（{0}）から最も自然な文字コードで表示しています（ルール未設定）。"
 }

@@ -1,3 +1,5 @@
+// Natural-text scoring, candidate ranking, and diff-focused line preview helpers.
+
 const MAX_SCORE_SAMPLES = 2_048;
 const DEFAULT_MAX_PREVIEW_LENGTH = 100;
 const LINE_WINDOW_LEAD = 20;
@@ -7,6 +9,8 @@ const LINE_SLICE_LIMIT = 512;
 const MIN_LIKELY_NON_ASCII = 2;
 const MIN_LIKELY_AVG_MARGIN = 1.5;
 const MIN_LIKELY_TOTAL_MARGIN = 4.0;
+const MIN_IDENTICAL_GROUP_AVG_SCORE = 1.0;
+const MIN_IDENTICAL_GROUP_TOTAL_SCORE = 2.0;
 
 export interface DecodedTextScore {
   readonly score: number;
@@ -22,6 +26,7 @@ export interface RankedEncodingCandidate {
   readonly avgScore: number;
   readonly nonAsciiCount: number;
   readonly likely: boolean;
+  readonly equivalentToLikely?: boolean;
 }
 
 export interface CandidatePreviewOptions {
@@ -39,7 +44,9 @@ type CharCategory =
   | "hiragana"
   | "katakana"
   | "cjkPunct"
-  | "kanji"
+  | "cjkBasic"
+  | "cjkCompat"
+  | "cjkRare"
   | "hangul"
   | "commonSymbol"
   | "latinLetter"
@@ -65,8 +72,13 @@ function isJapaneseCore(category: CharCategory): boolean {
     category === "hiragana" ||
     category === "katakana" ||
     category === "cjkPunct" ||
-    category === "kanji"
+    category === "cjkBasic" ||
+    category === "cjkCompat"
   );
+}
+
+function isKanaOrCjkPunct(category: CharCategory): boolean {
+  return category === "hiragana" || category === "katakana" || category === "cjkPunct";
 }
 
 function isAsciiLetter(code: number | undefined): boolean {
@@ -111,13 +123,16 @@ function isCommonSymbol(cp: number): boolean {
   return false;
 }
 
-function isKanji(cp: number): boolean {
-  return (
-    (cp >= 0x4e00 && cp <= 0x9fff) ||
-    (cp >= 0x3400 && cp <= 0x4dbf) ||
-    (cp >= 0xf900 && cp <= 0xfaff) ||
-    (cp >= 0x20000 && cp <= 0x323af)
-  );
+function isBasicKanji(cp: number): boolean {
+  return cp >= 0x4e00 && cp <= 0x9fff;
+}
+
+function isCompatKanji(cp: number): boolean {
+  return cp >= 0xf900 && cp <= 0xfaff;
+}
+
+function isRareKanji(cp: number): boolean {
+  return (cp >= 0x3400 && cp <= 0x4dbf) || (cp >= 0x20000 && cp <= 0x323af);
 }
 
 function isHangul(cp: number): boolean {
@@ -141,7 +156,9 @@ function classifyCodePoint(cp: number): CharCategory {
   ) {
     return "cjkPunct";
   }
-  if (isKanji(cp)) return "kanji";
+  if (isBasicKanji(cp)) return "cjkBasic";
+  if (isCompatKanji(cp)) return "cjkCompat";
+  if (isRareKanji(cp)) return "cjkRare";
   if (isHangul(cp)) return "hangul";
   if (cp >= 0xff61 && cp <= 0xff65) return "halfwidthKatakanaPunct";
   if (cp >= 0xff66 && cp <= 0xff9f) return "halfwidthKatakana";
@@ -196,8 +213,14 @@ export function scoreDecodedText(text: string): DecodedTextScore {
       case "cjkPunct":
         score += 2.5;
         break;
-      case "kanji":
+      case "cjkBasic":
         score += 2.0;
+        break;
+      case "cjkCompat":
+        score += 1.0;
+        break;
+      case "cjkRare":
+        score -= 0.5;
         break;
       case "hangul":
         score += 3.5;
@@ -237,11 +260,10 @@ export function scoreDecodedText(text: string): DecodedTextScore {
         break;
     }
 
-    if (
-      (isJapaneseCore(prevCategory) && isJapaneseCore(category)) ||
-      (prevCategory === "hangul" && category === "hangul")
-    ) {
+    if (prevCategory === "hangul" && category === "hangul") {
       score += 1.5;
+    } else if (isJapaneseCore(prevCategory) && isJapaneseCore(category)) {
+      score += isKanaOrCjkPunct(prevCategory) || isKanaOrCjkPunct(category) ? 1.5 : 0.5;
     }
 
     prevCategory = category;
@@ -525,6 +547,7 @@ export function rankDecodedCandidates(
     const { score, avgScore, nonAsciiCount, replacementCount } = scoreDecodedText(entry.text);
     return {
       encoding: entry.encoding,
+      text: entry.text,
       preview: previews[originalIndex]!,
       score,
       avgScore,
@@ -541,15 +564,24 @@ export function rankDecodedCandidates(
   });
 
   const top = scored[0];
-  const second = scored[1];
+  const secondDifferent = top ? scored.find((item) => item.text !== top.text) : undefined;
+  const hasCompetingMargin =
+    top !== undefined &&
+    secondDifferent !== undefined &&
+    top.score > 0 &&
+    top.avgScore - secondDifferent.avgScore >= MIN_LIKELY_AVG_MARGIN &&
+    top.score - secondDifferent.score >= MIN_LIKELY_TOTAL_MARGIN;
+  const hasIdenticalNaturalConsensus =
+    top !== undefined &&
+    secondDifferent === undefined &&
+    scored.length >= 2 &&
+    top.avgScore >= MIN_IDENTICAL_GROUP_AVG_SCORE &&
+    top.score >= MIN_IDENTICAL_GROUP_TOTAL_SCORE;
   const topIsLikely =
     top !== undefined &&
-    second !== undefined &&
     top.nonAsciiCount >= MIN_LIKELY_NON_ASCII &&
     top.replacementCount === 0 &&
-    top.score > 0 &&
-    top.avgScore - second.avgScore >= MIN_LIKELY_AVG_MARGIN &&
-    top.score - second.score >= MIN_LIKELY_TOTAL_MARGIN;
+    (hasCompetingMargin || hasIdenticalNaturalConsensus);
 
   return scored.map((entry, index) => ({
     encoding: entry.encoding,
@@ -558,5 +590,6 @@ export function rankDecodedCandidates(
     avgScore: entry.avgScore,
     nonAsciiCount: entry.nonAsciiCount,
     likely: index === 0 && topIsLikely,
+    ...(topIsLikely && top && entry.text === top.text ? { equivalentToLikely: true } : {}),
   }));
 }

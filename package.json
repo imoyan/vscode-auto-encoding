@@ -90,7 +90,7 @@
       {
         "command": "autoEncoding.inspectActiveFile",
         "title": "%command.inspectActiveFile%",
-        "icon": "$(pass)"
+        "icon": "$(symbol-text)"
       },
       {
         "command": "autoEncoding.convertFile",
@@ -282,6 +282,13 @@
           "command": "autoEncoding.convertFile",
           "when": "resourceScheme == file && !explorerResourceIsFolder",
           "group": "7_modification@51"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "autoEncoding.inspectActiveFile",
+          "when": "resourceScheme == file || resourceScheme == git",
+          "group": "navigation@90"
         }
       ],
       "editor/title/context": [

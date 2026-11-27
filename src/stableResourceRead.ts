@@ -3,6 +3,7 @@ import {
   StableLocalFileRead,
   localFileStillMatches,
   readStableLocalFile,
+  statLocalFileVersion,
 } from "./boundedFileRead.js";
 
 export interface StableResourceRead {
@@ -54,4 +55,29 @@ export async function resourceStillMatchesRead(
   return (
     await localFileStillMatches(uri.fsPath, read.localFile, maxSize)
   ) && !isDirty();
+}
+
+/** Returns a lightweight metadata token for display-only cache lookups without reading full file bytes. */
+export async function statResourceVersion(
+  uri: vscode.Uri,
+  maxSize: number,
+  isDirty: () => boolean,
+): Promise<string | undefined> {
+  if (isDirty() || uri.scheme !== "file") {
+    return undefined;
+  }
+  const version = await statLocalFileVersion(uri.fsPath, maxSize);
+  if (!version || isDirty()) {
+    return undefined;
+  }
+  return `file-stat:${version}`;
+}
+
+/** Builds the matching lightweight metadata token from an already-completed `StableResourceRead`. */
+export function statTokenFromStableRead(read: StableResourceRead): string | undefined {
+  if (!read.localFile) {
+    return undefined;
+  }
+  const f = read.localFile;
+  return `file-stat:${f.device}:${f.inode}:${f.size}:${f.mtimeMs}:${f.ctimeMs}`;
 }

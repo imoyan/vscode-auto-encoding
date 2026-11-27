@@ -115,6 +115,23 @@ export async function localFileStillMatches(
   }
 }
 
+/** Returns a lightweight metadata version token without reading file bytes (for display-only cache checks). */
+export async function statLocalFileVersion(
+  filePath: string,
+  maxBytes: number,
+): Promise<string | undefined> {
+  const limit = Math.max(0, Math.floor(maxBytes));
+  try {
+    const stat = await lstat(filePath);
+    if (!stat.isFile() || stat.size > limit) {
+      return undefined;
+    }
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+  } catch {
+    return undefined;
+  }
+}
+
 function sameFileVersion(
   left: Pick<Awaited<ReturnType<typeof lstat>>, "size" | "mtimeMs" | "ctimeMs" | "dev" | "ino">,
   right: Pick<Awaited<ReturnType<typeof lstat>>, "size" | "mtimeMs" | "ctimeMs" | "dev" | "ino">,

@@ -38,7 +38,7 @@
 
 ## Usage
 
-- **Status Bar**: Click the Auto Encoding status bar item to inspect the active file (or Git diff), preview and switch between ambiguous encoding candidates (display-only), register a file/folder rule, or convert the file.
+- **Editor Title Bar & Status Bar**: Click the `$(symbol-text)` button in the top-right corner of the editor or the Auto Encoding item in the bottom-right status bar to check the active file (or Git diff) and manually reopen in another encoding with one click (display-only, never modifies files).
 - **Explorer Context Menu**:
   - **Auto Encoding: Set Folder Encoding** / **Set File Encoding**
   - **Auto Encoding: Convert Files in Folder** / **Convert File Encoding & Line Endings**

@@ -172,3 +172,44 @@ test("scoreDecodedText favors Hangul text over mojibake", () => {
   const mojibake = scoreDecodedText("¾È³çÇÏ¼¼¿ä");
   assert.ok(hangul.avgScore > mojibake.avgScore);
 });
+
+test("scoreDecodedText separates Basic/Compat CJK from Extension A/B+ rare ideographs and supports identical-text consensus", () => {
+  const basicChinese = scoreDecodedText("中文测试内容，你好。");
+  const rareMojibake = scoreDecodedText("㐀㐁㐂㐃㐄");
+  assert.ok(basicChinese.avgScore > 2.5);
+  assert.ok(rareMojibake.score < 0);
+
+  const cjkVsGbMojibake = rankDecodedCandidates([
+    { encoding: "gb18030", text: "㐀㐁㐂㐃㐄" },
+    { encoding: "shiftjis", text: "日本語テスト" },
+  ]);
+  assert.equal(cjkVsGbMojibake[0]?.encoding, "shiftjis");
+  assert.equal(cjkVsGbMojibake[0]?.likely, true);
+  assert.equal(cjkVsGbMojibake[0]?.equivalentToLikely, true);
+  assert.equal(cjkVsGbMojibake[1]?.equivalentToLikely, undefined);
+
+  // Identical decoded text with >= 2 natural characters marks top (windows1252) likely and both equivalentToLikely
+  const westernPair = rankDecodedCandidates([
+    { encoding: "windows1252", text: "café naïve\n" },
+    { encoding: "iso88591", text: "café naïve\n" },
+  ]);
+  assert.equal(westernPair[0]?.encoding, "windows1252");
+  assert.equal(westernPair[0]?.likely, true);
+  assert.equal(westernPair[0]?.equivalentToLikely, true);
+  assert.equal(westernPair[1]?.encoding, "iso88591");
+  assert.equal(westernPair[1]?.likely, false);
+  assert.equal(westernPair[1]?.equivalentToLikely, true);
+
+  // 1 non-ASCII character or negative-score symbols stay conservative (likely: false)
+  const singleAccent = rankDecodedCandidates([
+    { encoding: "windows1252", text: "café\n" },
+    { encoding: "iso88591", text: "café\n" },
+  ]);
+  assert.equal(singleAccent[0]?.likely, false);
+
+  const symbolNoise = rankDecodedCandidates([
+    { encoding: "windows1252", text: "¤¢¤¤\n" },
+    { encoding: "iso88591", text: "¤¢¤¤\n" },
+  ]);
+  assert.equal(symbolNoise[0]?.likely, false);
+});

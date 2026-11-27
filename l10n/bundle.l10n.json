@@ -300,5 +300,9 @@
   "Open: {0} / Detected: {1} (convertible)": "Open: {0} / Detected: {1} (convertible)",
   "Saved bytes are {0}, which VS Code cannot open natively.": "Saved bytes are {0}, which VS Code cannot open natively.",
   "Click to convert and save as UTF-8, Shift JIS, etc. with a local backup.": "Click to convert and save as UTF-8, Shift JIS, etc. with a local backup.",
-  "Saved bytes are {0}, which VS Code cannot open natively. Click to convert and save as UTF-8, etc.": "Saved bytes are {0}, which VS Code cannot open natively. Click to convert and save as UTF-8, etc."
+  "Saved bytes are {0}, which VS Code cannot open natively. Click to convert and save as UTF-8, etc.": "Saved bytes are {0}, which VS Code cannot open natively. Click to convert and save as UTF-8, etc.",
+  "Estimated from candidates: {0} (no rule)": "Estimated from candidates: {0} (no rule)",
+  "Encoding rule: none (estimated from candidates: {0})": "Encoding rule: none (estimated from candidates: {0})",
+  "Displaying Git view using the most likely encoding estimated from candidates ({0}) (no rule).": "Displaying Git view using the most likely encoding estimated from candidates ({0}) (no rule).",
+  "Displaying using the most likely encoding estimated from candidates ({0}) (no rule).": "Displaying using the most likely encoding estimated from candidates ({0}) (no rule)."
 }

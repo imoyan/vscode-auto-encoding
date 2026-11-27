@@ -5,12 +5,17 @@ import { createContext, runInContext } from "node:vm";
 import { test } from "node:test";
 import ts from "typescript";
 
-function loadModule<T>(name: string, dependencies: Record<string, unknown>): T {
+function loadModule<T>(
+  name: string,
+  dependencies: Record<string, unknown>,
+  internalCache = new Map<string, unknown>(),
+): T {
   const source = readFileSync(path.join(process.cwd(), "src", name), "utf8");
   const output = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   });
-  const exports = {};
+  const exports: Record<string, unknown> = {};
+  internalCache.set(name, exports);
   runInContext(
     output.outputText,
     createContext({
@@ -19,6 +24,12 @@ function loadModule<T>(name: string, dependencies: Record<string, unknown>): T {
       TextDecoder,
       require: (id: string) => {
         if (id in dependencies) return dependencies[id];
+        if (id.startsWith("./editorEncoding") && id.endsWith(".js")) {
+          const sibling = `${id.slice(2, -3)}.ts`;
+          const cached = internalCache.get(sibling);
+          if (cached) return cached;
+          return loadModule(sibling, dependencies, internalCache);
+        }
         throw new Error(`Unexpected dependency: ${id}`);
       },
     }),
@@ -86,9 +97,8 @@ test("conversion refresh only reloads an already-open clean document", async () 
   assert.equal((calls[1]![1] as { encoding: string }).encoding, "utf8");
 });
 
-test("Explorer badge setting gates rule badges cleanly across modes, legacy fallback, and Git color preservation", () => {
+test("Explorer badge setting gates rule badges cleanly across modes and preserves Git colors", () => {
   const settings = new Map<string, unknown>();
-  const explicitSettings = new Map<string, unknown>();
   let rules: Array<{ pattern: string; encoding: string }> = [
     { pattern: "*.txt", encoding: "shiftjis" },
   ];
@@ -126,8 +136,8 @@ test("Explorer badge setting gates rule badges cleanly across modes, legacy fall
     "./workspaceRules.js": {
       fileUriForResource: (value: unknown) => value,
       configurationFor: () => ({
-        inspect: (key: string) => ({ workspaceValue: explicitSettings.get(key) }),
-        get: (key: string) => settings.get(key),
+        get: (key: string, defaultValue?: unknown) =>
+          settings.has(key) ? settings.get(key) : defaultValue,
       }),
       resolveRule: () => ({
         folder: { name: "workspace" },
@@ -152,25 +162,17 @@ test("Explorer badge setting gates rule badges cleanly across modes, legacy fall
   matchedIndex = 0;
   probeMatchIndex = 0;
   assert.equal(provider.provideFileDecoration(uri), undefined);
-  explicitSettings.set("explorerBadges", "all");
   settings.set("explorerBadges", "all");
   assert.equal(provider.provideFileDecoration(uri)?.badge, "SJ");
   assert.equal(provider.provideFileDecoration(uri)?.color, undefined);
 
   // 3. Explicit "none" hides all badges
-  explicitSettings.set("explorerBadges", "none");
   settings.set("explorerBadges", "none");
   probeMatchIndex = undefined;
   assert.equal(provider.provideFileDecoration(uri), undefined);
 
-  // 4. Legacy showExplorerBadges=false falls back to "none" only when explorerBadges is unset
-  explicitSettings.clear();
-  settings.clear();
-  settings.set("explorerBadges", "boundaries"); // simulated package.json default
-  settings.set("showExplorerBadges", false);
-  assert.equal(provider.provideFileDecoration(uri), undefined);
-
-  explicitSettings.set("explorerBadges", "boundaries");
+  // 4. Invalid setting falls back to "boundaries"
+  settings.set("explorerBadges", "invalid");
   assert.equal(provider.provideFileDecoration(uri)?.badge, "SJ");
 });
 
@@ -201,6 +203,20 @@ test("malformed backup JSON is ignored as an invalid record", async () => {
     Buffer.from(valid.split("CORRUPT")[1]!),
   ]);
   assert.equal(await backup.readBackupRecord({ scheme: "file" }), undefined);
+  // Missing required fields (e.g. legacy records without sizes/roots) must be rejected.
+  bytes = Buffer.from(
+    JSON.stringify({
+      version: 1,
+      originalUri: "file:///workspace/a.txt",
+      relativePath: "a.txt",
+      backupFile: "0.bin",
+      originalHash: "a",
+      convertedHash: "b",
+      sourceEncoding: "utf8",
+      targetEncoding: "utf8bom",
+    }),
+  );
+  assert.equal(await backup.readBackupRecord({ scheme: "file" }), undefined);
 });
 
 test("undo retains recovery state, rejects replacements and clears read-only completed data", async () => {
@@ -209,10 +225,15 @@ test("undo retains recovery state, rejects replacements and clears read-only com
   let record = {
     version: 1,
     originalUri: "/workspace/a.txt",
+    resolvedUri: "/workspace/a.txt",
+    conversionRootUri: "/workspace",
+    workspaceRootUri: "/workspace",
     relativePath: "a.txt",
     backupFile: "0.bin",
     originalHash: "original",
     convertedHash: "converted",
+    originalSize: 8,
+    convertedSize: 9,
     sourceEncoding: "utf8",
     targetEncoding: "utf8bom",
     recoveryRequired: false,
@@ -243,6 +264,7 @@ test("undo retains recovery state, rejects replacements and clears read-only com
       },
       FileType: { File: 1 },
       workspace: {
+        workspaceFolders: [{ uri: uri("/workspace") }],
         getWorkspaceFolder: () => ({ uri: uri("/workspace") }),
         fs: {
           readDirectory: async () => [["0.json", 1]],

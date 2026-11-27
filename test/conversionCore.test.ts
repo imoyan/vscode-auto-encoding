@@ -139,9 +139,8 @@ test("stops a conversion after cancellation", async () => {
 });
 
 test("keeps undo readable when conversion changes the file size", () => {
-  assert.equal(conversionBackupReadLimit(20, 10, 10), 20);
-  assert.equal(conversionBackupReadLimit(10, 20, 20), 20);
-  assert.equal(conversionBackupReadLimit(undefined, undefined, 30), 30);
+  assert.equal(conversionBackupReadLimit(20, 10), 20);
+  assert.equal(conversionBackupReadLimit(10, 20), 20);
 });
 
 test("bounds the total conversion backup before writing", () => {
@@ -152,7 +151,7 @@ test("bounds the total conversion backup before writing", () => {
 });
 
 test("rejects stored conversion sizes that can bypass undo limits", () => {
-  assert.equal(validStoredConversionSizes(undefined, undefined), true);
+  assert.equal(validStoredConversionSizes(undefined, undefined), false);
   assert.equal(validStoredConversionSizes(100 * 1024 * 1024, 320 * 1024 * 1024), true);
   assert.equal(validStoredConversionSizes(100 * 1024 * 1024 + 1, 1), false);
   assert.equal(validStoredConversionSizes(1, 320 * 1024 * 1024 + 1), false);

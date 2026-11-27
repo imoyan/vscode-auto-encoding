@@ -20,9 +20,6 @@ import {
   resolveStandaloneRegularFile,
 } from "./localPathSafety.js";
 
-const LEGACY_BACKUP_LIMIT = 100 * 1024 * 1024;
-const LEGACY_CONVERTED_LIMIT = 320 * 1024 * 1024;
-
 interface ResolvedRecoveryTarget {
   readonly rootRealPath?: string;
   readonly conversionRootRealPath?: string;
@@ -98,17 +95,13 @@ export async function restoreLastConversion(
           !rootRealPath ||
           !conversionRootRealPath ||
           !resolvedUri ||
-          (record.resolvedUri !== undefined && record.resolvedUri !== resolvedUri.toString()) ||
+          record.resolvedUri !== resolvedUri.toString() ||
           isDirty(originalUri, resolvedUri)
         ) {
           skipped += 1;
           continue;
         }
-        const maxSize = conversionBackupReadLimit(
-          record.originalSize,
-          record.convertedSize,
-          LEGACY_CONVERTED_LIMIT,
-        );
+        const maxSize = conversionBackupReadLimit(record.originalSize, record.convertedSize);
         const current = await readPinnedLocalFile(
           rootRealPath,
           resolvedUri.fsPath,
@@ -236,13 +229,12 @@ async function resolveRecoveryTarget(
   record: BackupRecord,
   originalUri: vscode.Uri,
 ): Promise<ResolvedRecoveryTarget> {
+  const storedConversionRoot = vscode.Uri.parse(record.conversionRootUri);
   if (record.standalone) {
-    if (!record.conversionRootUri || !record.resolvedUri) {
-      return { standalone: true, manualRecoveryRequired: false };
-    }
-    const storedRoot = vscode.Uri.parse(record.conversionRootUri);
     const conversionRootRealPath =
-      storedRoot.scheme === "file" ? await resolveRealDirectory(storedRoot.fsPath) : undefined;
+      storedConversionRoot.scheme === "file"
+        ? await resolveRealDirectory(storedConversionRoot.fsPath)
+        : undefined;
     if (!conversionRootRealPath) {
       return { standalone: true, manualRecoveryRequired: false };
     }
@@ -264,16 +256,11 @@ async function resolveRecoveryTarget(
     };
   }
 
-  const workspaceRootRealPath = await resolveOpenWorkspaceRoot(record, originalUri);
-  const storedConversionRoot = record.conversionRootUri
-    ? vscode.Uri.parse(record.conversionRootUri)
-    : undefined;
+  const workspaceRootRealPath = await resolveOpenWorkspaceRoot(record);
   const conversionRootRealPath =
-    workspaceRootRealPath && storedConversionRoot
-      ? storedConversionRoot.scheme === "file"
-        ? await resolveRealPathWithin(workspaceRootRealPath, storedConversionRoot.fsPath)
-        : undefined
-      : workspaceRootRealPath;
+    workspaceRootRealPath && storedConversionRoot.scheme === "file"
+      ? await resolveRealPathWithin(workspaceRootRealPath, storedConversionRoot.fsPath)
+      : undefined;
   const resolvedPath = conversionRootRealPath
     ? await resolveRealPathWithin(conversionRootRealPath, originalUri.fsPath)
     : undefined;
@@ -311,15 +298,9 @@ async function recoveryTargetPathIsCurrent(
   );
 }
 
-async function resolveOpenWorkspaceRoot(
-  record: BackupRecord,
-  originalUri: vscode.Uri,
-): Promise<string | undefined> {
+async function resolveOpenWorkspaceRoot(record: BackupRecord): Promise<string | undefined> {
   if (!record.workspaceRootUri) {
-    const currentOwner = vscode.workspace.getWorkspaceFolder(originalUri);
-    return currentOwner?.uri.scheme === "file"
-      ? resolveRealDirectory(currentOwner.uri.fsPath)
-      : undefined;
+    return undefined;
   }
   const storedRoot = vscode.Uri.parse(record.workspaceRootUri);
   if (storedRoot.scheme !== "file") {
@@ -346,7 +327,7 @@ async function readVerifiedBackup(
 ): Promise<Uint8Array | undefined> {
   const backup = await readBackupResource(
     vscode.Uri.joinPath(sessionUri, record.backupFile),
-    record.originalSize ?? LEGACY_BACKUP_LIMIT,
+    record.originalSize,
   );
   return backup && hashBytes(backup.bytes) === record.originalHash
     ? backup.bytes

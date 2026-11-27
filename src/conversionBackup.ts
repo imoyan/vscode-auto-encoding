@@ -123,17 +123,17 @@ export async function pruneEmptyWindowBackups(context: vscode.ExtensionContext):
 export interface BackupRecord {
   readonly version: 1;
   readonly originalUri: string;
-  readonly resolvedUri?: string;
-  readonly conversionRootUri?: string;
+  readonly resolvedUri: string;
+  readonly conversionRootUri: string;
   readonly workspaceRootUri?: string;
   readonly standalone?: boolean;
   readonly relativePath: string;
   readonly backupFile: string;
   readonly originalHash: string;
   readonly convertedHash: string;
-  readonly originalSize?: number;
-  readonly convertedSize?: number;
-  readonly recoveryRequired?: boolean;
+  readonly originalSize: number;
+  readonly convertedSize: number;
+  readonly recoveryRequired: boolean;
   readonly sourceEncoding: string;
   readonly targetEncoding: string;
 }
@@ -157,21 +157,22 @@ export async function readBackupRecord(uri: vscode.Uri): Promise<BackupRecord | 
     return undefined;
   }
   const candidate = parsed as Record<string, unknown>;
+  const standalone = candidate.standalone === true;
   if (
     candidate.version !== 1 ||
     typeof candidate.originalUri !== "string" ||
-    (candidate.resolvedUri !== undefined && typeof candidate.resolvedUri !== "string") ||
-    (candidate.conversionRootUri !== undefined &&
-      typeof candidate.conversionRootUri !== "string") ||
-    (candidate.workspaceRootUri !== undefined &&
-      typeof candidate.workspaceRootUri !== "string") ||
+    typeof candidate.resolvedUri !== "string" ||
+    typeof candidate.conversionRootUri !== "string" ||
     (candidate.standalone !== undefined && typeof candidate.standalone !== "boolean") ||
+    (!standalone && typeof candidate.workspaceRootUri !== "string") ||
+    (standalone &&
+      candidate.workspaceRootUri !== undefined &&
+      typeof candidate.workspaceRootUri !== "string") ||
     typeof candidate.relativePath !== "string" ||
     typeof candidate.backupFile !== "string" ||
     typeof candidate.originalHash !== "string" ||
     typeof candidate.convertedHash !== "string" ||
-    (candidate.recoveryRequired !== undefined &&
-      typeof candidate.recoveryRequired !== "boolean") ||
+    typeof candidate.recoveryRequired !== "boolean" ||
     typeof candidate.sourceEncoding !== "string" ||
     typeof candidate.targetEncoding !== "string"
   ) {

@@ -5,9 +5,8 @@ import {
   rmSync,
   symlinkSync,
   writeFileSync,
-  statSync,
-  utimesSync,
 } from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { TestContext } from "node:test";
@@ -87,10 +86,15 @@ test("rejects an in-place edit whose length and mtime are restored", async (cont
   const dir = temporaryDirectory(context);
   const file = path.join(dir, "same.txt");
   writeFileSync(file, "before");
-  const metadata = statSync(file);
   const before = await readStableLocalFile(file, 1024);
-  writeFileSync(file, "edited");
-  utimesSync(file, metadata.atime, metadata.mtime);
+  const handle = await open(file, "r+");
+  try {
+    const metadata = await handle.stat();
+    await handle.writeFile("edited");
+    await handle.utimes(metadata.atime, metadata.mtime);
+  } finally {
+    await handle.close();
+  }
   assert.equal(await localFileStillMatches(file, before!, 1024), false);
 });
 
@@ -100,7 +104,8 @@ test("treats disappearance after reading as an unstable result", async (context)
   writeFileSync(file, "data");
   let checks = 0;
   const result = await readStableLocalFile(file, 1024, () => {
-    if (++checks === 6) rmSync(file, { force: true });
+    // Remove the name after the handle is read, before its final path check.
+    if (++checks === 5) rmSync(file, { force: true });
     return false;
   });
   assert.equal(result, undefined);

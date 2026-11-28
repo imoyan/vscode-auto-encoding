@@ -150,19 +150,20 @@ export class PinnedLocalFile {
       const ancestors = await captureAncestorPins(realRoot, relative);
       if (!ancestors) return undefined;
 
-      const leafBefore = await fs.lstat(realFile, { bigint: true });
-      if (leafBefore.isSymbolicLink() || !leafBefore.isFile() || leafBefore.size > BigInt(maximum)) {
-        return undefined;
-      }
-
-      const flags = (writable ? fsConstants.O_RDWR : fsConstants.O_RDONLY) | (fsConstants.O_NOFOLLOW ?? 0);
+      // Do not truncate or create anything at open. Validate the opened file
+      // and its current name before reading, and keep using this descriptor.
+      const flags = (writable ? fsConstants.O_RDWR : fsConstants.O_RDONLY) |
+        fsConstants.O_NONBLOCK | (fsConstants.O_NOFOLLOW ?? 0);
       handle = await fs.open(realFile, flags);
 
       const openedStat = await handle.stat({ bigint: true });
+      const leafBefore = await fs.lstat(realFile, { bigint: true });
       if (
         !openedStat.isFile() ||
+        !leafBefore.isFile() ||
         openedStat.size > BigInt(maximum) ||
-        !sameCapturedVersion(toCapturedStat(leafBefore), openedStat)
+        !sameCapturedVersion(toCapturedStat(openedStat), leafBefore) ||
+        !(await verifyAncestorPins(ancestors))
       ) {
         await handle.close();
         return undefined;

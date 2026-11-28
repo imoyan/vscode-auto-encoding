@@ -23,15 +23,6 @@ export async function readStableLocalFile(
     return undefined;
   }
   const limit = Math.max(0, Math.floor(maxBytes));
-  let pathBefore: Awaited<ReturnType<typeof lstat>>;
-  try {
-    pathBefore = await lstat(filePath);
-  } catch {
-    return undefined;
-  }
-  if (isCancellationRequested() || !pathBefore.isFile() || pathBefore.size > limit) {
-    return undefined;
-  }
   let handle: Awaited<ReturnType<typeof open>>;
   try {
     handle = await open(
@@ -42,10 +33,13 @@ export async function readStableLocalFile(
     return undefined;
   }
   try {
+    // Validate the opened file and its current name before reading any bytes.
     const before = await handle.stat();
+    const pathBefore = await lstat(filePath);
     if (
       isCancellationRequested() ||
       !before.isFile() ||
+      !pathBefore.isFile() ||
       before.size > limit ||
       !sameFileVersion(pathBefore, before)
     ) {
